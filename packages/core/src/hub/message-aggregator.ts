@@ -33,6 +33,7 @@ export class MessageAggregator {
   private buffer = "";
   private previousText = "";
   private blockIndex = 0;
+  private active = false;
   private readonly chunker: BlockChunker;
 
   constructor(
@@ -60,15 +61,20 @@ export class MessageAggregator {
 
       case "message_start":
         this.resetState();
+        this.active = true;
         this.onPassthrough(event);
         return;
 
       case "message_update":
+        if (!this.active) return;
         this.handleMessageUpdate(event as AgentEvent & { type: "message_update" });
         return;
 
       case "message_end":
-        this.handleMessageEnd(event as AgentEvent & { type: "message_end" });
+        if (this.active) {
+          this.handleMessageEnd(event as AgentEvent & { type: "message_end" });
+        }
+        this.active = false;
         this.onPassthrough(event);
         return;
 
@@ -134,5 +140,6 @@ export class MessageAggregator {
     this.buffer = "";
     this.previousText = "";
     this.blockIndex = 0;
+    this.active = false;
   }
 }
