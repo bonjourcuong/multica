@@ -147,7 +147,10 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 
 	// If the issue is assigned to an agent with on_comment trigger, enqueue a new task.
 	// Skip when the comment comes from the assigned agent itself to avoid loops.
-	if authorType == "member" && h.shouldEnqueueOnComment(r.Context(), issue) {
+	// Also skip when the comment @mentions others but not the assignee agent —
+	// the user is talking to someone else, not requesting work from the assignee.
+	if authorType == "member" && h.shouldEnqueueOnComment(r.Context(), issue) &&
+		!h.commentMentionsOthersButNotAssignee(comment.Content, issue) {
 		// Resolve thread root: if the comment is a reply, agent should reply
 		// to the thread root (matching frontend behavior where all replies
 		// in a thread share the same top-level parent).
@@ -164,6 +167,27 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	h.enqueueMentionedAgentTasks(r.Context(), issue, comment, authorType, authorID)
 
 	writeJSON(w, http.StatusCreated, resp)
+}
+
+// commentMentionsOthersButNotAssignee returns true if the comment @mentions
+// anyone but does NOT @mention the issue's assignee agent. This is used to
+// suppress the on_comment trigger when the user is directing their comment at
+// someone else (e.g. sharing results with a colleague, asking another agent).
+func (h *Handler) commentMentionsOthersButNotAssignee(content string, issue db.Issue) bool {
+	mentions := util.ParseMentions(content)
+	if len(mentions) == 0 {
+		return false // No mentions — normal on_comment behavior
+	}
+	if !issue.AssigneeID.Valid {
+		return true // No assignee — mentions target others
+	}
+	assigneeID := uuidToString(issue.AssigneeID)
+	for _, m := range mentions {
+		if m.ID == assigneeID {
+			return false // Assignee is mentioned — allow trigger
+		}
+	}
+	return true // Others mentioned but not assignee — suppress trigger
 }
 
 // enqueueMentionedAgentTasks parses @agent mentions from comment content and
