@@ -116,6 +116,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var parentID pgtype.UUID
+	var parentComment *db.Comment
 	if req.ParentID != nil {
 		parentID = parseUUID(*req.ParentID)
 		parent, err := h.Queries.GetComment(r.Context(), parentID)
@@ -123,6 +124,7 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid parent comment")
 			return
 		}
+		parentComment = &parent
 	}
 
 	// Determine author identity: agent (via X-Agent-ID header) or member.
@@ -162,8 +164,11 @@ func (h *Handler) CreateComment(w http.ResponseWriter, r *http.Request) {
 	// Skip when the comment comes from the assigned agent itself to avoid loops.
 	// Also skip when the comment @mentions others but not the assignee agent —
 	// the user is talking to someone else, not requesting work from the assignee.
+	// Also skip when replying to another member's comment without @mentioning
+	// the assignee — the user is having a human-to-human conversation in the thread.
 	if authorType == "member" && h.shouldEnqueueOnComment(r.Context(), issue) &&
-		!h.commentMentionsOthersButNotAssignee(comment.Content, issue) {
+		!h.commentMentionsOthersButNotAssignee(comment.Content, issue) &&
+		!h.isReplyToMemberWithoutMentioningAssignee(comment.Content, parentComment, issue) {
 		// Resolve thread root: if the comment is a reply, agent should reply
 		// to the thread root (matching frontend behavior where all replies
 		// in a thread share the same top-level parent).
@@ -201,6 +206,30 @@ func (h *Handler) commentMentionsOthersButNotAssignee(content string, issue db.I
 		}
 	}
 	return true // Others mentioned but not assignee — suppress trigger
+}
+
+// isReplyToMemberWithoutMentioningAssignee returns true if this comment is a
+// reply to another member's comment and does NOT @mention the assignee agent.
+// This suppresses the on_comment trigger for human-to-human thread replies —
+// the user is conversing with another person, not requesting work from the agent.
+func (h *Handler) isReplyToMemberWithoutMentioningAssignee(content string, parent *db.Comment, issue db.Issue) bool {
+	if parent == nil {
+		return false // Top-level comment — not a reply
+	}
+	if parent.AuthorType != "member" {
+		return false // Replying to an agent — should trigger
+	}
+	// Replying to a member. Only trigger if the assignee agent is explicitly @mentioned.
+	if !issue.AssigneeID.Valid {
+		return true
+	}
+	assigneeID := uuidToString(issue.AssigneeID)
+	for _, m := range util.ParseMentions(content) {
+		if m.ID == assigneeID {
+			return false // Assignee is mentioned — allow trigger
+		}
+	}
+	return true // Reply to member without mentioning assignee — suppress
 }
 
 // enqueueMentionedAgentTasks parses @agent mentions from comment content and
