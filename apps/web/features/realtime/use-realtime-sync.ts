@@ -24,6 +24,16 @@ import type {
   IssueCreatedPayload,
   IssueDeletedPayload,
   InboxNewPayload,
+  CommentCreatedPayload,
+  CommentUpdatedPayload,
+  CommentDeletedPayload,
+  ActivityCreatedPayload,
+  ReactionAddedPayload,
+  ReactionRemovedPayload,
+  IssueReactionAddedPayload,
+  IssueReactionRemovedPayload,
+  SubscriberAddedPayload,
+  SubscriberRemovedPayload,
 } from "@/shared/types";
 
 const logger = createLogger("realtime-sync");
@@ -36,8 +46,9 @@ const logger = createLogger("realtime-sync");
  * - Debounce per-prefix prevents rapid-fire refetches (e.g. bulk issue updates)
  * - Precise handlers only for side effects (toast, navigation, self-check)
  *
- * Per-page events (comments, activity, subscribers, daemon) are still handled
- * by individual components via useWSEvent — not here.
+ * Per-issue events (comments, activity, reactions, subscribers) are handled
+ * both here (invalidation fallback) and by per-page useWSEvent hooks (granular
+ * updates). Daemon events are handled by individual components only.
  */
 export function useRealtimeSync(ws: WSClient | null) {
   const qc = useQueryClient();
@@ -83,6 +94,11 @@ export function useRealtimeSync(ws: WSClient | null) {
     // Event types handled by specific handlers below — skip generic refresh
     const specificEvents = new Set([
       "issue:updated", "issue:created", "issue:deleted", "inbox:new",
+      "comment:created", "comment:updated", "comment:deleted",
+      "activity:created",
+      "reaction:added", "reaction:removed",
+      "issue_reaction:added", "issue_reaction:removed",
+      "subscriber:added", "subscriber:removed",
     ]);
 
     const unsubAny = ws.onAny((msg) => {
@@ -130,6 +146,68 @@ export function useRealtimeSync(ws: WSClient | null) {
       if (wsId) onInboxNew(qc, wsId, item);
     });
 
+    // --- Timeline event handlers (global fallback) ---
+    // These events are also handled granularly by useIssueTimeline when
+    // IssueDetail is mounted. This global handler ensures the timeline cache
+    // is invalidated even when IssueDetail is unmounted, so stale data
+    // isn't served on next mount (staleTime: Infinity relies on this).
+
+    const invalidateTimeline = (issueId: string) => {
+      qc.invalidateQueries({ queryKey: issueKeys.timeline(issueId) });
+    };
+
+    const unsubCommentCreated = ws.on("comment:created", (p) => {
+      const { comment } = p as CommentCreatedPayload;
+      if (comment?.issue_id) invalidateTimeline(comment.issue_id);
+    });
+
+    const unsubCommentUpdated = ws.on("comment:updated", (p) => {
+      const { comment } = p as CommentUpdatedPayload;
+      if (comment?.issue_id) invalidateTimeline(comment.issue_id);
+    });
+
+    const unsubCommentDeleted = ws.on("comment:deleted", (p) => {
+      const { issue_id } = p as CommentDeletedPayload;
+      if (issue_id) invalidateTimeline(issue_id);
+    });
+
+    const unsubActivityCreated = ws.on("activity:created", (p) => {
+      const { issue_id } = p as ActivityCreatedPayload;
+      if (issue_id) invalidateTimeline(issue_id);
+    });
+
+    const unsubReactionAdded = ws.on("reaction:added", (p) => {
+      const { issue_id } = p as ReactionAddedPayload;
+      if (issue_id) invalidateTimeline(issue_id);
+    });
+
+    const unsubReactionRemoved = ws.on("reaction:removed", (p) => {
+      const { issue_id } = p as ReactionRemovedPayload;
+      if (issue_id) invalidateTimeline(issue_id);
+    });
+
+    // --- Issue-level reactions & subscribers (global fallback) ---
+
+    const unsubIssueReactionAdded = ws.on("issue_reaction:added", (p) => {
+      const { issue_id } = p as IssueReactionAddedPayload;
+      if (issue_id) qc.invalidateQueries({ queryKey: issueKeys.reactions(issue_id) });
+    });
+
+    const unsubIssueReactionRemoved = ws.on("issue_reaction:removed", (p) => {
+      const { issue_id } = p as IssueReactionRemovedPayload;
+      if (issue_id) qc.invalidateQueries({ queryKey: issueKeys.reactions(issue_id) });
+    });
+
+    const unsubSubscriberAdded = ws.on("subscriber:added", (p) => {
+      const { issue_id } = p as SubscriberAddedPayload;
+      if (issue_id) qc.invalidateQueries({ queryKey: issueKeys.subscribers(issue_id) });
+    });
+
+    const unsubSubscriberRemoved = ws.on("subscriber:removed", (p) => {
+      const { issue_id } = p as SubscriberRemovedPayload;
+      if (issue_id) qc.invalidateQueries({ queryKey: issueKeys.subscribers(issue_id) });
+    });
+
     // --- Side-effect handlers (toast, navigation) ---
 
     const unsubWsDeleted = ws.on("workspace:deleted", (p) => {
@@ -169,6 +247,16 @@ export function useRealtimeSync(ws: WSClient | null) {
       unsubIssueCreated();
       unsubIssueDeleted();
       unsubInboxNew();
+      unsubCommentCreated();
+      unsubCommentUpdated();
+      unsubCommentDeleted();
+      unsubActivityCreated();
+      unsubReactionAdded();
+      unsubReactionRemoved();
+      unsubIssueReactionAdded();
+      unsubIssueReactionRemoved();
+      unsubSubscriberAdded();
+      unsubSubscriberRemoved();
       unsubWsDeleted();
       unsubMemberRemoved();
       unsubMemberAdded();
