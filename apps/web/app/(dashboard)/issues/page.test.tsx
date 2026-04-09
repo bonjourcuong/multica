@@ -305,6 +305,7 @@ vi.mock("@dnd-kit/utilities", () => ({
 
 const issueDefaults = {
   parent_issue_id: null,
+  project_id: null,
   position: 0,
 };
 

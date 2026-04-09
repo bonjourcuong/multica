@@ -8,6 +8,7 @@ import type { AuthState } from "../auth/store";
 import type { WorkspaceStore } from "../workspace/store";
 import { createLogger } from "../logger";
 import { issueKeys } from "../issues/queries";
+import { projectKeys } from "../projects/queries";
 import {
   onIssueCreated,
   onIssueUpdated,
@@ -89,6 +90,10 @@ export function useRealtimeSync(
       skill: () => {
         const wsId = workspaceStore.getState().workspace?.id;
         if (wsId) qc.invalidateQueries({ queryKey: workspaceKeys.skills(wsId) });
+      },
+      project: () => {
+        const wsId = workspaceStore.getState().workspace?.id;
+        if (wsId) qc.invalidateQueries({ queryKey: projectKeys.all(wsId) });
       },
     };
 
@@ -294,6 +299,7 @@ export function useRealtimeSync(
           qc.invalidateQueries({ queryKey: workspaceKeys.agents(wsId) });
           qc.invalidateQueries({ queryKey: workspaceKeys.members(wsId) });
           qc.invalidateQueries({ queryKey: workspaceKeys.skills(wsId) });
+          qc.invalidateQueries({ queryKey: projectKeys.all(wsId) });
         }
         qc.invalidateQueries({ queryKey: workspaceKeys.list() });
       } catch (e) {

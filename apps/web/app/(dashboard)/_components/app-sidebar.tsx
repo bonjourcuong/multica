@@ -16,6 +16,7 @@ import {
   BookOpenText,
   SquarePen,
   CircleUser,
+  FolderKanban,
 } from "lucide-react";
 import { WorkspaceAvatar } from "@multica/views/workspace/workspace-avatar";
 import { useIssueDraftStore } from "@multica/core/issues/stores/draft-store";
@@ -53,6 +54,7 @@ const primaryNav = [
   { href: "/inbox", label: "Inbox", icon: Inbox },
   { href: "/my-issues", label: "My Issues", icon: CircleUser },
   { href: "/issues", label: "Issues", icon: ListTodo },
+  { href: "/projects", label: "Projects", icon: FolderKanban },
 ];
 
 const workspaceNav = [

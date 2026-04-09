@@ -36,6 +36,10 @@ import type {
   TimelineEntry,
   TaskMessagePayload,
   Attachment,
+  Project,
+  CreateProjectRequest,
+  UpdateProjectRequest,
+  ListProjectsResponse,
 } from "../types";
 import { type Logger, noopLogger } from "../logger";
 
@@ -606,5 +610,36 @@ export class ApiClient {
 
   async deleteAttachment(id: string): Promise<void> {
     await this.fetch(`/api/attachments/${id}`, { method: "DELETE" });
+  }
+
+  // Projects
+  async listProjects(params?: { status?: string }): Promise<ListProjectsResponse> {
+    const search = new URLSearchParams();
+    if (params?.status) search.set("status", params.status);
+    return this.fetch(`/api/projects?${search}`);
+  }
+
+  async getProject(id: string): Promise<Project> {
+    return this.fetch(`/api/projects/${id}`);
+  }
+
+  async createProject(data: CreateProjectRequest): Promise<Project> {
+    const search = new URLSearchParams();
+    if (this.workspaceId) search.set("workspace_id", this.workspaceId);
+    return this.fetch(`/api/projects?${search}`, {
+      method: "POST",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async updateProject(id: string, data: UpdateProjectRequest): Promise<Project> {
+    return this.fetch(`/api/projects/${id}`, {
+      method: "PUT",
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteProject(id: string): Promise<void> {
+    await this.fetch(`/api/projects/${id}`, { method: "DELETE" });
   }
 }

@@ -32,6 +32,7 @@ type IssueResponse struct {
 	CreatorType        string                  `json:"creator_type"`
 	CreatorID          string                  `json:"creator_id"`
 	ParentIssueID      *string                 `json:"parent_issue_id"`
+	ProjectID          *string                 `json:"project_id"`
 	Position           float64                 `json:"position"`
 	DueDate            *string                 `json:"due_date"`
 	CreatedAt          string                  `json:"created_at"`
@@ -56,6 +57,7 @@ func issueToResponse(i db.Issue, issuePrefix string) IssueResponse {
 		CreatorType:   i.CreatorType,
 		CreatorID:     uuidToString(i.CreatorID),
 		ParentIssueID: uuidToPtr(i.ParentIssueID),
+		ProjectID:     uuidToPtr(i.ProjectID),
 		Position:      i.Position,
 		DueDate:       timestampToPtr(i.DueDate),
 		CreatedAt:     timestampToString(i.CreatedAt),
@@ -217,6 +219,7 @@ func searchRowToIssue(row db.SearchIssuesRow) db.Issue {
 		CreatedAt:          row.CreatedAt,
 		UpdatedAt:          row.UpdatedAt,
 		Number:             row.Number,
+		ProjectID:          row.ProjectID,
 	}
 }
 
@@ -377,6 +380,7 @@ type CreateIssueRequest struct {
 	AssigneeType       *string  `json:"assignee_type"`
 	AssigneeID         *string  `json:"assignee_id"`
 	ParentIssueID      *string  `json:"parent_issue_id"`
+	ProjectID          *string  `json:"project_id"`
 	DueDate            *string  `json:"due_date"`
 	AttachmentIDs      []string `json:"attachment_ids,omitempty"`
 }
@@ -485,6 +489,7 @@ func (h *Handler) CreateIssue(w http.ResponseWriter, r *http.Request) {
 		Position:           0,
 		DueDate:            dueDate,
 		Number:             issueNumber,
+		ProjectID:          func() pgtype.UUID { if req.ProjectID != nil { return parseUUID(*req.ProjectID) }; return pgtype.UUID{} }(),
 	})
 	if err != nil {
 		slog.Warn("create issue failed", append(logger.RequestAttrs(r), "error", err, "workspace_id", workspaceID)...)
@@ -542,6 +547,7 @@ type UpdateIssueRequest struct {
 	Position           *float64 `json:"position"`
 	DueDate            *string  `json:"due_date"`
 	ParentIssueID      *string  `json:"parent_issue_id"`
+	ProjectID          *string  `json:"project_id"`
 }
 
 func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
@@ -577,6 +583,7 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 		AssigneeID:    prevIssue.AssigneeID,
 		DueDate:       prevIssue.DueDate,
 		ParentIssueID: prevIssue.ParentIssueID,
+		ProjectID:     prevIssue.ProjectID,
 	}
 
 	// COALESCE fields — only set when explicitly provided
@@ -654,6 +661,13 @@ func (h *Handler) UpdateIssue(w http.ResponseWriter, r *http.Request) {
 			params.ParentIssueID = newParentID
 		} else {
 			params.ParentIssueID = pgtype.UUID{Valid: false} // explicit null = remove parent
+		}
+	}
+	if _, ok := rawFields["project_id"]; ok {
+		if req.ProjectID != nil {
+			params.ProjectID = parseUUID(*req.ProjectID)
+		} else {
+			params.ProjectID = pgtype.UUID{Valid: false}
 		}
 	}
 
