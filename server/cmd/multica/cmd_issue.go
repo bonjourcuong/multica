@@ -206,10 +206,14 @@ func runIssueList(cmd *cobra.Command, _ []string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	params := url.Values{}
-	if client.WorkspaceID != "" {
-		params.Set("workspace_id", client.WorkspaceID)
+	if client.WorkspaceID == "" {
+		if _, err := requireWorkspaceID(cmd); err != nil {
+			return err
+		}
 	}
+
+	params := url.Values{}
+	params.Set("workspace_id", client.WorkspaceID)
 	if v, _ := cmd.Flags().GetString("status"); v != "" {
 		params.Set("status", v)
 	}
