@@ -62,6 +62,7 @@ curl -fsSL https://raw.githubusercontent.com/multica-ai/multica/main/scripts/ins
 ```bash
 multica login          # 认证（打开浏览器）
 multica daemon start   # 启动本地 Agent 运行时
+multica daemon stop    # 停止 daemon
 ```
 
 > **自部署？** 加上 `--local` 在本地部署完整的 Multica 服务：

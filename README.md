@@ -62,6 +62,7 @@ After installation:
 ```bash
 multica login          # Authenticate (opens browser)
 multica daemon start   # Start the local agent runtime
+multica daemon stop    # Stop the daemon when done
 ```
 
 > **Self-hosting?** Add `--local` to deploy a full Multica server on your machine:
