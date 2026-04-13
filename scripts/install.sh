@@ -69,8 +69,8 @@ install_cli_brew() {
     fail "Failed to add Homebrew tap. Check your network connection."
   fi
   # brew install exits non-zero if already installed on older Homebrew versions
-  if ! brew install multica 2>/dev/null; then
-    if brew list multica >/dev/null 2>&1; then
+  if ! brew install "$BREW_PACKAGE" 2>/dev/null; then
+    if brew list "$BREW_PACKAGE" >/dev/null 2>&1; then
       ok "Multica CLI already installed via Homebrew"
     else
       fail "Failed to install multica via Homebrew."
@@ -142,7 +142,7 @@ get_latest_version() {
 upgrade_cli_brew() {
   info "Upgrading Multica CLI via Homebrew..."
   brew update 2>/dev/null || true
-  if brew upgrade multica 2>/dev/null; then
+  if brew upgrade "$BREW_PACKAGE" 2>/dev/null; then
     ok "Multica CLI upgraded via Homebrew"
   else
     # brew upgrade exits non-zero if already up to date
@@ -169,7 +169,7 @@ install_cli() {
     fi
 
     info "Multica CLI $current_ver installed, latest is $latest_ver — upgrading..."
-    if command_exists brew && brew list multica >/dev/null 2>&1; then
+    if command_exists brew && brew list "$BREW_PACKAGE" >/dev/null 2>&1; then
       upgrade_cli_brew
     else
       install_cli_binary
