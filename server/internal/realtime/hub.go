@@ -385,6 +385,8 @@ func HandleWebSocket(hub *Hub, mc MembershipChecker, pr PATResolver, w http.Resp
 			return
 		}
 		userID = uid
+
+		conn.WriteMessage(websocket.TextMessage, []byte(`{"type":"auth_ack"}`))
 	}
 
 	client := &Client{

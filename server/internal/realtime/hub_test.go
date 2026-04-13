@@ -2,6 +2,7 @@ package realtime
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -57,11 +58,23 @@ func connectWS(t *testing.T, server *httptest.Server) *websocket.Conn {
 	if err != nil {
 		t.Fatalf("failed to connect WebSocket: %v", err)
 	}
-	// First-message auth: send token as the first frame.
-	authMsg := `{"type":"auth","payload":{"token":"` + token + `"}}`
-	if err := conn.WriteMessage(websocket.TextMessage, []byte(authMsg)); err != nil {
+	authMsg, _ := json.Marshal(map[string]any{
+		"type":    "auth",
+		"payload": map[string]string{"token": token},
+	})
+	if err := conn.WriteMessage(websocket.TextMessage, authMsg); err != nil {
 		t.Fatalf("failed to send auth message: %v", err)
 	}
+	// Read auth_ack before returning the connection.
+	conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, ack, err := conn.ReadMessage()
+	if err != nil {
+		t.Fatalf("failed to read auth_ack: %v", err)
+	}
+	if !strings.Contains(string(ack), "auth_ack") {
+		t.Fatalf("expected auth_ack, got %s", ack)
+	}
+	conn.SetReadDeadline(time.Time{})
 	return conn
 }
 
