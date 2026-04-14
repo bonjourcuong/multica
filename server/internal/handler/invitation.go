@@ -134,10 +134,25 @@ func (h *Handler) CreateInvitation(w http.ResponseWriter, r *http.Request) {
 	// Notify the invitee in real time if they are a registered user.
 	userID := requestUserID(r)
 	eventPayload := map[string]any{"invitation": resp}
+	var workspaceName string
 	if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(workspaceID)); err == nil {
+		workspaceName = ws.Name
 		eventPayload["workspace_name"] = ws.Name
 	}
 	h.publish(protocol.EventInvitationCreated, workspaceID, "member", userID, eventPayload)
+
+	// Send invitation email (fire-and-forget).
+	if h.EmailService != nil && workspaceName != "" {
+		inviterName := email // fallback
+		if inviter, err := h.Queries.GetUser(r.Context(), requester.UserID); err == nil {
+			inviterName = inviter.Name
+		}
+		go func() {
+			if err := h.EmailService.SendInvitationEmail(email, inviterName, workspaceName); err != nil {
+				slog.Warn("failed to send invitation email", "email", email, "error", err)
+			}
+		}()
+	}
 
 	writeJSON(w, http.StatusCreated, resp)
 }
