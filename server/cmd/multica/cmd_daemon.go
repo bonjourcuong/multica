@@ -265,12 +265,21 @@ func runDaemonForeground(cmd *cobra.Command) error {
 			serverURL = c.ServerURL
 		}
 	}
+	stateDir := daemonDirForProfile(profile)
+	if stateDir != "" {
+		// Ensure the state directory exists before LoadConfig tries to write
+		// daemon.id into it on first run.
+		if err := os.MkdirAll(stateDir, 0o755); err != nil {
+			return fmt.Errorf("create daemon state dir %s: %w", stateDir, err)
+		}
+	}
 	overrides := daemon.Overrides{
 		ServerURL:   serverURL,
 		DaemonID:    flagString(cmd, "daemon-id"),
 		DeviceName:  flagString(cmd, "device-name"),
 		RuntimeName: flagString(cmd, "runtime-name"),
 		Profile:     profile,
+		StateDir:    stateDir,
 		HealthPort:  healthPortForProfile(profile),
 	}
 	if d, _ := cmd.Flags().GetDuration("poll-interval"); d > 0 {

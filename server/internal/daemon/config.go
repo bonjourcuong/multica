@@ -27,7 +27,8 @@ const (
 // Config holds all daemon configuration.
 type Config struct {
 	ServerBaseURL      string
-	DaemonID           string
+	DaemonID           string   // persistent UUID from <state_dir>/daemon.id
+	LegacyDaemonIDs    []string // hostname-derived IDs reported to the server so it can consolidate stale runtime rows
 	DeviceName         string
 	RuntimeName        string
 	CLIVersion         string                // multica CLI version (e.g. "0.1.13")
@@ -60,6 +61,7 @@ type Overrides struct {
 	DeviceName         string
 	RuntimeName        string
 	Profile            string // profile name (empty = default)
+	StateDir           string // directory that holds daemon.id, daemon.pid, daemon.log (resolved by cmd_daemon)
 	HealthPort         int    // health check port (0 = use default)
 }
 
@@ -187,15 +189,30 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	// Profile
 	profile := overrides.Profile
 
-	// String overrides
-	daemonID := envOrDefault("MULTICA_DAEMON_ID", host)
-	if overrides.DaemonID != "" {
-		daemonID = overrides.DaemonID
+	// daemon_id: explicit override > env var > persistent UUID in state dir.
+	// The UUID is generated once on first run and reread forever after, so
+	// hostname drift (.local suffix, system rename, profile switch) can no
+	// longer produce a second agent_runtime row for the same physical daemon.
+	daemonID := strings.TrimSpace(overrides.DaemonID)
+	if daemonID == "" {
+		daemonID = strings.TrimSpace(os.Getenv("MULTICA_DAEMON_ID"))
 	}
-	// NOTE: daemon_id is intentionally stable (hostname or explicit override).
-	// The unique constraint (workspace_id, daemon_id, provider) already prevents
-	// collisions within the same workspace. Appending the profile name caused
-	// duplicate runtimes when users switched profiles.
+	legacyDaemonIDs := LegacyDaemonIDCandidates(host, profile)
+	if daemonID == "" {
+		if overrides.StateDir == "" {
+			return Config{}, fmt.Errorf("daemon_id not set and state directory is empty; pass StateDir or set MULTICA_DAEMON_ID")
+		}
+		id, _, err := LoadOrCreateDaemonID(overrides.StateDir)
+		if err != nil {
+			return Config{}, err
+		}
+		daemonID = id
+	} else {
+		// Explicit override path: the caller pins the daemon_id themselves, so
+		// legacy consolidation on the server would incorrectly target rows
+		// they don't own. Skip it.
+		legacyDaemonIDs = nil
+	}
 
 	deviceName := envOrDefault("MULTICA_DAEMON_DEVICE_NAME", host)
 	if overrides.DeviceName != "" {
@@ -258,6 +275,7 @@ func LoadConfig(overrides Overrides) (Config, error) {
 	return Config{
 		ServerBaseURL:      serverBaseURL,
 		DaemonID:           daemonID,
+		LegacyDaemonIDs:    legacyDaemonIDs,
 		DeviceName:         deviceName,
 		RuntimeName:        runtimeName,
 		Profile:            profile,

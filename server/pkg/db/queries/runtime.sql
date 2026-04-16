@@ -79,13 +79,12 @@ SELECT count(*) FROM agent WHERE runtime_id = $1 AND archived_at IS NULL;
 -- name: DeleteArchivedAgentsByRuntime :exec
 DELETE FROM agent WHERE runtime_id = $1 AND archived_at IS NOT NULL;
 
--- name: MigrateAgentsToRuntime :execrows
--- Migrates agents from stale offline runtimes to the newly registered runtime.
--- Only migrates from runtimes that match the same workspace, provider, owner,
--- AND whose daemon_id starts with the current daemon_id followed by '-'.
--- This scopes migration to old profile-suffixed runtimes from the same machine
--- (e.g. "MacBook-staging" matches daemon_id_prefix "MacBook") without touching
--- runtimes from other machines belonging to the same user.
+-- name: MigrateAgentsFromLegacyDaemon :execrows
+-- Reparents agents from the legacy (hostname-derived) runtime row to the
+-- newly registered UUID row. Scoped to a single (workspace, provider,
+-- owner) triple so we never touch another user's runtimes even if they
+-- share a hostname on the same machine. Called once per legacy daemon_id
+-- candidate reported by the daemon at registration time.
 UPDATE agent
 SET runtime_id = @new_runtime_id
 WHERE runtime_id IN (
@@ -94,9 +93,39 @@ WHERE runtime_id IN (
       AND ar.provider = @provider
       AND ar.owner_id = @owner_id
       AND ar.id != @new_runtime_id
-      AND ar.status = 'offline'
-      AND ar.daemon_id LIKE @daemon_id_prefix || '-%'
+      AND ar.daemon_id = @legacy_daemon_id
 );
+
+-- name: MigrateTasksFromLegacyDaemon :execrows
+-- Same scoping as MigrateAgentsFromLegacyDaemon. Must run before the DELETE
+-- below because agent_task_queue.runtime_id is ON DELETE CASCADE; deleting
+-- the legacy row first would silently drop in-flight tasks.
+UPDATE agent_task_queue
+SET runtime_id = @new_runtime_id
+WHERE runtime_id IN (
+    SELECT ar.id FROM agent_runtime ar
+    WHERE ar.workspace_id = @workspace_id
+      AND ar.provider = @provider
+      AND ar.owner_id = @owner_id
+      AND ar.id != @new_runtime_id
+      AND ar.daemon_id = @legacy_daemon_id
+);
+
+-- name: DeleteLegacyRuntime :execrows
+-- Removes the stale hostname-derived runtime row once its agents and tasks
+-- have been reparented. legacy_daemon_id on the new row captures the last
+-- removed value as a breadcrumb.
+DELETE FROM agent_runtime
+WHERE workspace_id = @workspace_id
+  AND provider = @provider
+  AND owner_id = @owner_id
+  AND id != @new_runtime_id
+  AND daemon_id = @legacy_daemon_id;
+
+-- name: SetRuntimeLegacyDaemonID :exec
+UPDATE agent_runtime
+SET legacy_daemon_id = @legacy_daemon_id
+WHERE id = @id;
 
 -- name: DeleteStaleOfflineRuntimes :many
 -- Deletes runtimes that have been offline for longer than the TTL and have

@@ -40,6 +40,40 @@ func (q *Queries) DeleteArchivedAgentsByRuntime(ctx context.Context, runtimeID p
 	return err
 }
 
+const deleteLegacyRuntime = `-- name: DeleteLegacyRuntime :execrows
+DELETE FROM agent_runtime
+WHERE workspace_id = $1
+  AND provider = $2
+  AND owner_id = $3
+  AND id != $4
+  AND daemon_id = $5
+`
+
+type DeleteLegacyRuntimeParams struct {
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	Provider       string      `json:"provider"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	NewRuntimeID   pgtype.UUID `json:"new_runtime_id"`
+	LegacyDaemonID pgtype.Text `json:"legacy_daemon_id"`
+}
+
+// Removes the stale hostname-derived runtime row once its agents and tasks
+// have been reparented. legacy_daemon_id on the new row captures the last
+// removed value as a breadcrumb.
+func (q *Queries) DeleteLegacyRuntime(ctx context.Context, arg DeleteLegacyRuntimeParams) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteLegacyRuntime,
+		arg.WorkspaceID,
+		arg.Provider,
+		arg.OwnerID,
+		arg.NewRuntimeID,
+		arg.LegacyDaemonID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteStaleOfflineRuntimes = `-- name: DeleteStaleOfflineRuntimes :many
 DELETE FROM agent_runtime
 WHERE status = 'offline'
@@ -115,7 +149,7 @@ func (q *Queries) FailTasksForOfflineRuntimes(ctx context.Context) ([]FailTasksF
 }
 
 const getAgentRuntime = `-- name: GetAgentRuntime :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
 WHERE id = $1
 `
 
@@ -136,12 +170,13 @@ func (q *Queries) GetAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRun
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.OwnerID,
+		&i.LegacyDaemonID,
 	)
 	return i, err
 }
 
 const getAgentRuntimeForWorkspace = `-- name: GetAgentRuntimeForWorkspace :one
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -167,12 +202,13 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.OwnerID,
+		&i.LegacyDaemonID,
 	)
 	return i, err
 }
 
 const listAgentRuntimes = `-- name: ListAgentRuntimes :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
 WHERE workspace_id = $1
 ORDER BY created_at ASC
 `
@@ -200,6 +236,7 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.OwnerID,
+			&i.LegacyDaemonID,
 		); err != nil {
 			return nil, err
 		}
@@ -212,7 +249,7 @@ func (q *Queries) ListAgentRuntimes(ctx context.Context, workspaceID pgtype.UUID
 }
 
 const listAgentRuntimesByOwner = `-- name: ListAgentRuntimesByOwner :many
-SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id FROM agent_runtime
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
 WHERE workspace_id = $1 AND owner_id = $2
 ORDER BY created_at ASC
 `
@@ -245,6 +282,7 @@ func (q *Queries) ListAgentRuntimesByOwner(ctx context.Context, arg ListAgentRun
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.OwnerID,
+			&i.LegacyDaemonID,
 		); err != nil {
 			return nil, err
 		}
@@ -289,7 +327,7 @@ func (q *Queries) MarkStaleRuntimesOffline(ctx context.Context, staleSeconds flo
 	return items, nil
 }
 
-const migrateAgentsToRuntime = `-- name: MigrateAgentsToRuntime :execrows
+const migrateAgentsFromLegacyDaemon = `-- name: MigrateAgentsFromLegacyDaemon :execrows
 UPDATE agent
 SET runtime_id = $1
 WHERE runtime_id IN (
@@ -298,32 +336,68 @@ WHERE runtime_id IN (
       AND ar.provider = $3
       AND ar.owner_id = $4
       AND ar.id != $1
-      AND ar.status = 'offline'
-      AND ar.daemon_id LIKE $5 || '-%'
+      AND ar.daemon_id = $5
 )
 `
 
-type MigrateAgentsToRuntimeParams struct {
+type MigrateAgentsFromLegacyDaemonParams struct {
 	NewRuntimeID   pgtype.UUID `json:"new_runtime_id"`
 	WorkspaceID    pgtype.UUID `json:"workspace_id"`
 	Provider       string      `json:"provider"`
 	OwnerID        pgtype.UUID `json:"owner_id"`
-	DaemonIDPrefix pgtype.Text `json:"daemon_id_prefix"`
+	LegacyDaemonID pgtype.Text `json:"legacy_daemon_id"`
 }
 
-// Migrates agents from stale offline runtimes to the newly registered runtime.
-// Only migrates from runtimes that match the same workspace, provider, owner,
-// AND whose daemon_id starts with the current daemon_id followed by '-'.
-// This scopes migration to old profile-suffixed runtimes from the same machine
-// (e.g. "MacBook-staging" matches daemon_id_prefix "MacBook") without touching
-// runtimes from other machines belonging to the same user.
-func (q *Queries) MigrateAgentsToRuntime(ctx context.Context, arg MigrateAgentsToRuntimeParams) (int64, error) {
-	result, err := q.db.Exec(ctx, migrateAgentsToRuntime,
+// Reparents agents from the legacy (hostname-derived) runtime row to the
+// newly registered UUID row. Scoped to a single (workspace, provider,
+// owner) triple so we never touch another user's runtimes even if they
+// share a hostname on the same machine. Called once per legacy daemon_id
+// candidate reported by the daemon at registration time.
+func (q *Queries) MigrateAgentsFromLegacyDaemon(ctx context.Context, arg MigrateAgentsFromLegacyDaemonParams) (int64, error) {
+	result, err := q.db.Exec(ctx, migrateAgentsFromLegacyDaemon,
 		arg.NewRuntimeID,
 		arg.WorkspaceID,
 		arg.Provider,
 		arg.OwnerID,
-		arg.DaemonIDPrefix,
+		arg.LegacyDaemonID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const migrateTasksFromLegacyDaemon = `-- name: MigrateTasksFromLegacyDaemon :execrows
+UPDATE agent_task_queue
+SET runtime_id = $1
+WHERE runtime_id IN (
+    SELECT ar.id FROM agent_runtime ar
+    WHERE ar.workspace_id = $2
+      AND ar.provider = $3
+      AND ar.owner_id = $4
+      AND ar.id != $1
+      AND ar.daemon_id = $5
+)
+`
+
+type MigrateTasksFromLegacyDaemonParams struct {
+	NewRuntimeID   pgtype.UUID `json:"new_runtime_id"`
+	WorkspaceID    pgtype.UUID `json:"workspace_id"`
+	Provider       string      `json:"provider"`
+	OwnerID        pgtype.UUID `json:"owner_id"`
+	LegacyDaemonID pgtype.Text `json:"legacy_daemon_id"`
+}
+
+// Same scoping as MigrateAgentsFromLegacyDaemon. Must run before the DELETE
+// below because agent_task_queue.runtime_id is ON DELETE CASCADE; deleting
+// the legacy row first would silently drop in-flight tasks.
+func (q *Queries) MigrateTasksFromLegacyDaemon(ctx context.Context, arg MigrateTasksFromLegacyDaemonParams) (int64, error) {
+	result, err := q.db.Exec(ctx, migrateTasksFromLegacyDaemon,
+		arg.NewRuntimeID,
+		arg.WorkspaceID,
+		arg.Provider,
+		arg.OwnerID,
+		arg.LegacyDaemonID,
 	)
 	if err != nil {
 		return 0, err
@@ -342,11 +416,27 @@ func (q *Queries) SetAgentRuntimeOffline(ctx context.Context, id pgtype.UUID) er
 	return err
 }
 
+const setRuntimeLegacyDaemonID = `-- name: SetRuntimeLegacyDaemonID :exec
+UPDATE agent_runtime
+SET legacy_daemon_id = $1
+WHERE id = $2
+`
+
+type SetRuntimeLegacyDaemonIDParams struct {
+	LegacyDaemonID pgtype.Text `json:"legacy_daemon_id"`
+	ID             pgtype.UUID `json:"id"`
+}
+
+func (q *Queries) SetRuntimeLegacyDaemonID(ctx context.Context, arg SetRuntimeLegacyDaemonIDParams) error {
+	_, err := q.db.Exec(ctx, setRuntimeLegacyDaemonID, arg.LegacyDaemonID, arg.ID)
+	return err
+}
+
 const updateAgentRuntimeHeartbeat = `-- name: UpdateAgentRuntimeHeartbeat :one
 UPDATE agent_runtime
 SET status = 'online', last_seen_at = now(), updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id
 `
 
 func (q *Queries) UpdateAgentRuntimeHeartbeat(ctx context.Context, id pgtype.UUID) (AgentRuntime, error) {
@@ -366,6 +456,7 @@ func (q *Queries) UpdateAgentRuntimeHeartbeat(ctx context.Context, id pgtype.UUI
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.OwnerID,
+		&i.LegacyDaemonID,
 	)
 	return i, err
 }
@@ -393,7 +484,7 @@ DO UPDATE SET
     owner_id = COALESCE(EXCLUDED.owner_id, agent_runtime.owner_id),
     last_seen_at = now(),
     updated_at = now()
-RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id
+RETURNING id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id
 `
 
 type UpsertAgentRuntimeParams struct {
@@ -435,6 +526,7 @@ func (q *Queries) UpsertAgentRuntime(ctx context.Context, arg UpsertAgentRuntime
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.OwnerID,
+		&i.LegacyDaemonID,
 	)
 	return i, err
 }

@@ -79,6 +79,153 @@ func TestDaemonRegister_WithDaemonToken(t *testing.T) {
 	testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
 }
 
+// TestDaemonRegister_ConsolidatesLegacyRuntime reproduces the duplicate-
+// runtime scenario from MUL-975: an agent_runtime row already exists for a
+// hostname-derived daemon_id (e.g. "host.local"), with an agent and task
+// pointing at it. When the upgraded daemon registers with a persistent UUID
+// daemon_id and reports the old hostname as a legacy candidate, the stale row
+// must be deleted and its agents + tasks reparented to the new UUID row.
+func TestDaemonRegister_ConsolidatesLegacyRuntime(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+	ctx := context.Background()
+
+	legacyDaemonID := "Jiayuans-MacBook-Pro.local"
+	provider := "claude"
+
+	// Seed a legacy runtime row owned by the test user.
+	var legacyRuntimeID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status,
+			device_info, metadata, owner_id, last_seen_at
+		)
+		VALUES ($1, $2, 'Legacy Claude Runtime', 'local', $3, 'offline',
+				'', '{}'::jsonb, $4, now())
+		RETURNING id
+	`, testWorkspaceID, legacyDaemonID, provider, testUserID).Scan(&legacyRuntimeID); err != nil {
+		t.Fatalf("seed legacy runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, legacyRuntimeID)
+	})
+
+	var legacyAgentID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent (
+			workspace_id, name, description, runtime_mode, runtime_config,
+			runtime_id, visibility, max_concurrent_tasks, owner_id
+		)
+		VALUES ($1, 'Legacy Agent', '', 'local', '{}'::jsonb, $2, 'workspace', 1, $3)
+		RETURNING id
+	`, testWorkspaceID, legacyRuntimeID, testUserID).Scan(&legacyAgentID); err != nil {
+		t.Fatalf("seed legacy agent: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent WHERE id = $1`, legacyAgentID)
+	})
+
+	var legacyIssueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_id, creator_type)
+		VALUES ($1, 'consolidation-test', 'todo', 'medium', $2, 'member')
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&legacyIssueID); err != nil {
+		t.Fatalf("seed issue: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, legacyIssueID)
+	})
+
+	var legacyTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, legacyAgentID, legacyRuntimeID, legacyIssueID).Scan(&legacyTaskID); err != nil {
+		t.Fatalf("seed task: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, legacyTaskID)
+	})
+
+	// Register with a new UUID daemon_id + the legacy hostname reported as a
+	// legacy candidate. PAT auth (newRequest) so the upsert picks up the user
+	// as owner_id.
+	newDaemonID := "4d1b2b26-7f9b-4f50-9ea8-8e1f1ca88888"
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/daemon/register", map[string]any{
+		"workspace_id":      testWorkspaceID,
+		"daemon_id":         newDaemonID,
+		"device_name":       "Jiayuan-MacBook-Pro",
+		"legacy_daemon_ids": []string{legacyDaemonID, "Jiayuans-MacBook-Pro"},
+		"runtimes": []map[string]any{
+			{"name": "Claude", "type": provider, "version": "1.0.0", "status": "online"},
+		},
+	})
+
+	testHandler.DaemonRegister(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DaemonRegister: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp struct {
+		Runtimes []map[string]any `json:"runtimes"`
+	}
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(resp.Runtimes) != 1 {
+		t.Fatalf("expected 1 runtime in response, got %d", len(resp.Runtimes))
+	}
+	newRuntimeID := resp.Runtimes[0]["id"].(string)
+	if newRuntimeID == legacyRuntimeID {
+		t.Fatalf("expected new runtime id to differ from legacy id %s", legacyRuntimeID)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, newRuntimeID)
+	})
+
+	// Legacy row must be gone.
+	var legacyCount int
+	if err := testPool.QueryRow(ctx, `SELECT count(*) FROM agent_runtime WHERE id = $1`, legacyRuntimeID).Scan(&legacyCount); err != nil {
+		t.Fatalf("count legacy runtime: %v", err)
+	}
+	if legacyCount != 0 {
+		t.Fatalf("expected legacy runtime row to be deleted, still present")
+	}
+
+	// Agent must now point at the new runtime row.
+	var agentRuntimeID string
+	if err := testPool.QueryRow(ctx, `SELECT runtime_id FROM agent WHERE id = $1`, legacyAgentID).Scan(&agentRuntimeID); err != nil {
+		t.Fatalf("read agent.runtime_id: %v", err)
+	}
+	if agentRuntimeID != newRuntimeID {
+		t.Fatalf("expected agent.runtime_id=%s after consolidation, got %s", newRuntimeID, agentRuntimeID)
+	}
+
+	// Queued task must also have been reparented (not cascade-deleted).
+	var taskRuntimeID, taskStatus string
+	if err := testPool.QueryRow(ctx, `SELECT runtime_id, status FROM agent_task_queue WHERE id = $1`, legacyTaskID).Scan(&taskRuntimeID, &taskStatus); err != nil {
+		t.Fatalf("read task: %v", err)
+	}
+	if taskRuntimeID != newRuntimeID {
+		t.Fatalf("expected task.runtime_id=%s after consolidation, got %s", newRuntimeID, taskRuntimeID)
+	}
+	if taskStatus != "queued" {
+		t.Fatalf("expected task status unchanged (queued), got %q", taskStatus)
+	}
+
+	// legacy_daemon_id breadcrumb should be set on the new row.
+	var breadcrumb string
+	if err := testPool.QueryRow(ctx, `SELECT COALESCE(legacy_daemon_id, '') FROM agent_runtime WHERE id = $1`, newRuntimeID).Scan(&breadcrumb); err != nil {
+		t.Fatalf("read legacy_daemon_id: %v", err)
+	}
+	if breadcrumb == "" {
+		t.Fatalf("expected legacy_daemon_id breadcrumb on new row, got empty")
+	}
+}
+
 func TestDaemonRegister_WithDaemonToken_WorkspaceMismatch(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")

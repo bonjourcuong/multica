@@ -118,10 +118,16 @@ func (h *Handler) resolveTaskWorkspaceID(r *http.Request, task db.AgentTaskQueue
 type DaemonRegisterRequest struct {
 	WorkspaceID string `json:"workspace_id"`
 	DaemonID    string `json:"daemon_id"`
-	DeviceName  string `json:"device_name"`
-	CLIVersion  string `json:"cli_version"` // multica CLI version
-	LaunchedBy  string `json:"launched_by"` // "desktop" when spawned by the Electron app
-	Runtimes    []struct {
+	// LegacyDaemonIDs carries any hostname-derived identifiers the daemon
+	// may have reported in earlier versions (before daemon_id became a
+	// persistent UUID). The server consolidates any matching stale rows
+	// into the current registration so agent FKs stay valid across the
+	// upgrade. Optional.
+	LegacyDaemonIDs []string `json:"legacy_daemon_ids"`
+	DeviceName      string   `json:"device_name"`
+	CLIVersion      string   `json:"cli_version"` // multica CLI version
+	LaunchedBy      string   `json:"launched_by"` // "desktop" when spawned by the Electron app
+	Runtimes        []struct {
 		Name    string `json:"name"`
 		Type    string `json:"type"`
 		Version string `json:"version"` // agent CLI version (claude/codex)
@@ -287,26 +293,7 @@ func (h *Handler) DaemonRegister(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
-		// Migrate agents from old offline runtimes on the same machine to the
-		// newly registered runtime. Uses the runtime's owner_id (preserved via
-		// COALESCE on upsert) so migration works with both PAT and daemon tokens.
-		// Scoped by daemon_id prefix so that only old profile-suffixed runtimes
-		// (e.g. "hostname-staging") from this machine are affected.
-		effectiveOwnerID := registered.OwnerID
-		if effectiveOwnerID.Valid {
-			migrated, err := h.Queries.MigrateAgentsToRuntime(r.Context(), db.MigrateAgentsToRuntimeParams{
-				NewRuntimeID:   registered.ID,
-				WorkspaceID:    parseUUID(req.WorkspaceID),
-				Provider:       provider,
-				OwnerID:        effectiveOwnerID,
-				DaemonIDPrefix: strToText(req.DaemonID),
-			})
-			if err != nil {
-				slog.Warn("failed to migrate agents to new runtime", "runtime_id", uuidToString(registered.ID), "error", err)
-			} else if migrated > 0 {
-				slog.Info("migrated agents to new runtime", "runtime_id", uuidToString(registered.ID), "provider", provider, "migrated_count", migrated)
-			}
-		}
+		h.consolidateLegacyRuntimes(r, registered, req.WorkspaceID, provider, req.LegacyDaemonIDs)
 
 		resp = append(resp, runtimeToResponse(registered))
 	}
@@ -338,6 +325,103 @@ func (h *Handler) GetDaemonWorkspaceRepos(w http.ResponseWriter, r *http.Request
 	}
 
 	writeJSON(w, http.StatusOK, workspaceReposResponse(workspaceID, ws.Repos))
+}
+
+// consolidateLegacyRuntimes merges any hostname-derived agent_runtime rows
+// this machine previously produced into the just-upserted UUID row. For each
+// legacy candidate (hostname, hostname.local, hostname-<profile>, etc.) we
+// reparent agents and tasks, delete the stale row, and record the last value
+// as legacy_daemon_id for audit. Scoped by (workspace, provider, owner) so a
+// different user's rows on a machine sharing the same hostname are untouched.
+//
+// Errors are logged but never fail registration: consolidation is a best-effort
+// cleanup and should not block a healthy daemon from coming online.
+func (h *Handler) consolidateLegacyRuntimes(r *http.Request, registered db.AgentRuntime, workspaceID, provider string, legacyDaemonIDs []string) {
+	if len(legacyDaemonIDs) == 0 {
+		return
+	}
+	// Owner is required to scope the migration; without it we'd risk touching
+	// rows belonging to other users. Daemon-token flows rely on COALESCE in
+	// UpsertAgentRuntime to preserve an existing owner on re-register.
+	if !registered.OwnerID.Valid {
+		return
+	}
+
+	workspaceUUID := parseUUID(workspaceID)
+	var lastMatched string
+	var totalAgents, totalTasks, totalDeleted int64
+
+	for _, legacyID := range legacyDaemonIDs {
+		legacyID = strings.TrimSpace(legacyID)
+		if legacyID == "" {
+			continue
+		}
+		// Skip self-match: if the daemon reported its own new daemon_id as a
+		// legacy candidate we'd wipe the row we just created.
+		if legacyID == strings.TrimSpace(registered.DaemonID.String) {
+			continue
+		}
+
+		agents, err := h.Queries.MigrateAgentsFromLegacyDaemon(r.Context(), db.MigrateAgentsFromLegacyDaemonParams{
+			NewRuntimeID:   registered.ID,
+			WorkspaceID:    workspaceUUID,
+			Provider:       provider,
+			OwnerID:        registered.OwnerID,
+			LegacyDaemonID: strToText(legacyID),
+		})
+		if err != nil {
+			slog.Warn("legacy runtime consolidation: migrate agents failed", "runtime_id", uuidToString(registered.ID), "legacy_daemon_id", legacyID, "error", err)
+			continue
+		}
+
+		tasks, err := h.Queries.MigrateTasksFromLegacyDaemon(r.Context(), db.MigrateTasksFromLegacyDaemonParams{
+			NewRuntimeID:   registered.ID,
+			WorkspaceID:    workspaceUUID,
+			Provider:       provider,
+			OwnerID:        registered.OwnerID,
+			LegacyDaemonID: strToText(legacyID),
+		})
+		if err != nil {
+			slog.Warn("legacy runtime consolidation: migrate tasks failed", "runtime_id", uuidToString(registered.ID), "legacy_daemon_id", legacyID, "error", err)
+			continue
+		}
+
+		deleted, err := h.Queries.DeleteLegacyRuntime(r.Context(), db.DeleteLegacyRuntimeParams{
+			WorkspaceID:    workspaceUUID,
+			Provider:       provider,
+			OwnerID:        registered.OwnerID,
+			NewRuntimeID:   registered.ID,
+			LegacyDaemonID: strToText(legacyID),
+		})
+		if err != nil {
+			slog.Warn("legacy runtime consolidation: delete legacy row failed", "runtime_id", uuidToString(registered.ID), "legacy_daemon_id", legacyID, "error", err)
+			continue
+		}
+
+		if deleted > 0 || agents > 0 || tasks > 0 {
+			lastMatched = legacyID
+			totalAgents += agents
+			totalTasks += tasks
+			totalDeleted += deleted
+		}
+	}
+
+	if lastMatched != "" {
+		if err := h.Queries.SetRuntimeLegacyDaemonID(r.Context(), db.SetRuntimeLegacyDaemonIDParams{
+			ID:             registered.ID,
+			LegacyDaemonID: strToText(lastMatched),
+		}); err != nil {
+			slog.Warn("legacy runtime consolidation: record legacy_daemon_id failed", "runtime_id", uuidToString(registered.ID), "error", err)
+		}
+		slog.Info("legacy runtime consolidated",
+			"runtime_id", uuidToString(registered.ID),
+			"provider", provider,
+			"legacy_daemon_id", lastMatched,
+			"agents_reparented", totalAgents,
+			"tasks_reparented", totalTasks,
+			"rows_deleted", totalDeleted,
+		)
+	}
 }
 
 // DaemonDeregister marks runtimes as offline when the daemon shuts down.

@@ -211,6 +211,9 @@ func (d *Daemon) registerRuntimesForWorkspace(ctx context.Context, workspaceID s
 		"launched_by":  d.cfg.LaunchedBy,
 		"runtimes":     runtimes,
 	}
+	if len(d.cfg.LegacyDaemonIDs) > 0 {
+		req["legacy_daemon_ids"] = d.cfg.LegacyDaemonIDs
+	}
 
 	resp, err := d.client.Register(ctx, req)
 	if err != nil {
