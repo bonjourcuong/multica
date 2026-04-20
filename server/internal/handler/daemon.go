@@ -521,16 +521,32 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	runtimeID := chi.URLParam(r, "runtimeId")
 	start := time.Now()
 
+	var (
+		outcome                    = "unauth"
+		authMs, claimMs, buildMs   int64
+		buildStart                 time.Time
+	)
+	defer func() {
+		// Emit at function exit so error / unauth paths also carry timing.
+		// build_ms is computed from buildStart only when we entered the
+		// response-build phase (otherwise stays 0).
+		if !buildStart.IsZero() {
+			buildMs = time.Since(buildStart).Milliseconds()
+		}
+		logClaimEndpointSlow(runtimeID, outcome, start, authMs, claimMs, buildMs)
+	}()
+
 	// Verify the caller owns this runtime's workspace.
 	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
 		return
 	}
-	authMs := time.Since(start).Milliseconds()
+	authMs = time.Since(start).Milliseconds()
 
 	claimStart := time.Now()
 	task, err := h.TaskService.ClaimTaskForRuntime(r.Context(), parseUUID(runtimeID))
-	claimMs := time.Since(claimStart).Milliseconds()
+	claimMs = time.Since(claimStart).Milliseconds()
 	if err != nil {
+		outcome = "error_claim"
 		writeError(w, http.StatusInternalServerError, "failed to claim task: "+err.Error())
 		return
 	}
@@ -538,15 +554,12 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	if task == nil {
 		slog.Debug("no task to claim", "runtime_id", runtimeID)
 		writeJSON(w, http.StatusOK, map[string]any{"task": nil})
-		logClaimEndpointSlow(runtimeID, "no_task", start, authMs, claimMs, 0)
+		outcome = "no_task"
 		return
 	}
 
-	buildStart := time.Now()
-	defer func() {
-		buildMs := time.Since(buildStart).Milliseconds()
-		logClaimEndpointSlow(runtimeID, "claimed", start, authMs, claimMs, buildMs)
-	}()
+	outcome = "claimed"
+	buildStart = time.Now()
 
 	// Build response with fresh agent data (name + skills + custom_env + custom_args).
 	resp := taskToResponse(*task)

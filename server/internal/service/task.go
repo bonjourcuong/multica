@@ -175,46 +175,64 @@ func (s *TaskService) CancelTask(ctx context.Context, taskID pgtype.UUID) (*db.A
 // respecting max_concurrent_tasks.
 func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
+	var (
+		outcome                                                            = "unknown"
+		getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs int64
+	)
+	defer func() {
+		s.maybeLogClaimSlow(agentID, outcome, start, getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs)
+	}()
+
 	t0 := start
 	agent, err := s.Queries.GetAgent(ctx, agentID)
-	getAgentMs := time.Since(t0).Milliseconds()
+	getAgentMs = time.Since(t0).Milliseconds()
 	if err != nil {
+		outcome = "error_get_agent"
 		return nil, fmt.Errorf("agent not found: %w", err)
 	}
 
 	t0 = time.Now()
 	running, err := s.Queries.CountRunningTasks(ctx, agentID)
-	countRunningMs := time.Since(t0).Milliseconds()
+	countRunningMs = time.Since(t0).Milliseconds()
 	if err != nil {
+		outcome = "error_count_running"
 		return nil, fmt.Errorf("count running tasks: %w", err)
 	}
 	if running >= int64(agent.MaxConcurrentTasks) {
 		slog.Debug("task claim: no capacity", "agent_id", util.UUIDToString(agentID), "running", running, "max", agent.MaxConcurrentTasks)
-		s.maybeLogClaimSlow(agentID, "no_capacity", start, getAgentMs, countRunningMs, 0)
+		outcome = "no_capacity"
 		return nil, nil // No capacity
 	}
 
 	t0 = time.Now()
 	task, err := s.Queries.ClaimAgentTask(ctx, agentID)
-	claimAgentMs := time.Since(t0).Milliseconds()
+	claimAgentMs = time.Since(t0).Milliseconds()
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			slog.Debug("task claim: no tasks available", "agent_id", util.UUIDToString(agentID))
-			s.maybeLogClaimSlow(agentID, "no_tasks", start, getAgentMs, countRunningMs, claimAgentMs)
+			outcome = "no_tasks"
 			return nil, nil // No tasks available
 		}
+		outcome = "error_claim"
 		return nil, fmt.Errorf("claim task: %w", err)
 	}
 
 	slog.Info("task claimed", "task_id", util.UUIDToString(task.ID), "agent_id", util.UUIDToString(agentID))
-	s.maybeLogClaimSlow(agentID, "claimed", start, getAgentMs, countRunningMs, claimAgentMs)
 
-	// Update agent status to working
+	// Update agent status to working. Hits the DB and may publish events,
+	// so it must be inside the timed window.
+	t0 = time.Now()
 	s.updateAgentStatus(ctx, agentID, "working")
+	updateStatusMs = time.Since(t0).Milliseconds()
 
-	// Broadcast task:dispatch
+	// Broadcast task:dispatch. ResolveTaskWorkspaceID inside this path can
+	// re-query issue/chat_session/autopilot_run, so it can also be a real
+	// contributor to claim latency.
+	t0 = time.Now()
 	s.broadcastTaskDispatch(ctx, task)
+	dispatchMs = time.Since(t0).Milliseconds()
 
+	outcome = "claimed"
 	return &task, nil
 }
 
@@ -222,29 +240,53 @@ func (s *TaskService) ClaimTask(ctx context.Context, agentID pgtype.UUID) (*db.A
 // still respecting each agent's max_concurrent_tasks limit.
 func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.UUID) (*db.AgentTaskQueue, error) {
 	start := time.Now()
+	var (
+		outcome             = "no_task"
+		listMs, loopMs      int64
+		listCount, tried    int
+		claimedFlag         bool
+	)
+	defer func() {
+		totalMs := time.Since(start).Milliseconds()
+		if totalMs < 300 {
+			return
+		}
+		slog.Info("claim_for_runtime slow",
+			"runtime_id", util.UUIDToString(runtimeID),
+			"outcome", outcome,
+			"total_ms", totalMs,
+			"list_pending_ms", listMs,
+			"list_pending_count", listCount,
+			"agents_tried", tried,
+			"claim_loop_ms", loopMs,
+			"claimed", claimedFlag,
+		)
+	}()
+
 	t0 := start
 	tasks, err := s.Queries.ListPendingTasksByRuntime(ctx, runtimeID)
-	listMs := time.Since(t0).Milliseconds()
+	listMs = time.Since(t0).Milliseconds()
+	listCount = len(tasks)
 	if err != nil {
+		outcome = "error_list"
 		return nil, fmt.Errorf("list pending tasks: %w", err)
 	}
 
 	loopStart := time.Now()
 	triedAgents := map[string]struct{}{}
-	var (
-		claimed     *db.AgentTaskQueue
-		agentsTried int
-	)
+	var claimed *db.AgentTaskQueue
 	for _, candidate := range tasks {
 		agentKey := util.UUIDToString(candidate.AgentID)
 		if _, seen := triedAgents[agentKey]; seen {
 			continue
 		}
 		triedAgents[agentKey] = struct{}{}
-		agentsTried++
+		tried++
 
 		task, err := s.ClaimTask(ctx, candidate.AgentID)
 		if err != nil {
+			loopMs = time.Since(loopStart).Milliseconds()
+			outcome = "error_claim"
 			return nil, err
 		}
 		if task != nil && task.RuntimeID == runtimeID {
@@ -252,21 +294,10 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 			break
 		}
 	}
-	loopMs := time.Since(loopStart).Milliseconds()
-	totalMs := time.Since(start).Milliseconds()
-
-	// Slow-only log so we can see where the time goes on the prod tail.
-	// Threshold matches the inner ClaimTask threshold (300ms).
-	if totalMs >= 300 {
-		slog.Info("claim_for_runtime slow",
-			"runtime_id", util.UUIDToString(runtimeID),
-			"total_ms", totalMs,
-			"list_pending_ms", listMs,
-			"list_pending_count", len(tasks),
-			"agents_tried", agentsTried,
-			"claim_loop_ms", loopMs,
-			"claimed", claimed != nil,
-		)
+	loopMs = time.Since(loopStart).Milliseconds()
+	if claimed != nil {
+		claimedFlag = true
+		outcome = "claimed"
 	}
 
 	return claimed, nil
@@ -274,8 +305,10 @@ func (s *TaskService) ClaimTaskForRuntime(ctx context.Context, runtimeID pgtype.
 
 // maybeLogClaimSlow emits one structured log per ClaimTask call when its total
 // latency exceeds 300ms, so the prod tail can be diagnosed without flooding
-// logs at normal poll rates.
-func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, start time.Time, getAgentMs, countRunningMs, claimAgentMs int64) {
+// logs at normal poll rates. Called via defer so it captures the full path
+// including post-claim updateAgentStatus / broadcastTaskDispatch (both of
+// which can hit the DB) and any error exit.
+func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, start time.Time, getAgentMs, countRunningMs, claimAgentMs, updateStatusMs, dispatchMs int64) {
 	totalMs := time.Since(start).Milliseconds()
 	if totalMs < 300 {
 		return
@@ -287,6 +320,8 @@ func (s *TaskService) maybeLogClaimSlow(agentID pgtype.UUID, outcome string, sta
 		"get_agent_ms", getAgentMs,
 		"count_running_ms", countRunningMs,
 		"claim_agent_ms", claimAgentMs,
+		"update_status_ms", updateStatusMs,
+		"dispatch_ms", dispatchMs,
 	)
 }
 
