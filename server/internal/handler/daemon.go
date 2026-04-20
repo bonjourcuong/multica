@@ -594,12 +594,25 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 					resp.Repos = repos
 				}
 			}
-			// Resume from the chat session's persistent session.
+			// Resume from the chat session's persistent session, falling back
+			// to the most recent task that recorded a session_id when the
+			// chat_session pointer is missing or stale (e.g. a previous task
+			// failed before reporting completion). Without this fallback a
+			// single failed turn would silently drop the entire conversation
+			// memory on the next message.
 			if cs.SessionID.Valid {
 				resp.PriorSessionID = cs.SessionID.String
 			}
 			if cs.WorkDir.Valid {
 				resp.PriorWorkDir = cs.WorkDir.String
+			}
+			if resp.PriorSessionID == "" {
+				if prior, err := h.Queries.GetLastChatTaskSession(r.Context(), cs.ID); err == nil && prior.SessionID.Valid {
+					resp.PriorSessionID = prior.SessionID.String
+					if prior.WorkDir.Valid && resp.PriorWorkDir == "" {
+						resp.PriorWorkDir = prior.WorkDir.String
+					}
+				}
 			}
 			// Load the latest user message for the chat prompt.
 			if msgs, err := h.Queries.ListChatMessages(r.Context(), cs.ID); err == nil && len(msgs) > 0 {
@@ -807,7 +820,9 @@ func (h *Handler) GetTaskStatus(w http.ResponseWriter, r *http.Request) {
 
 // FailTask marks a running task as failed.
 type TaskFailRequest struct {
-	Error string `json:"error"`
+	Error     string `json:"error"`
+	SessionID string `json:"session_id,omitempty"`
+	WorkDir   string `json:"work_dir,omitempty"`
 }
 
 func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
@@ -824,7 +839,7 @@ func (h *Handler) FailTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error)
+	task, err := h.TaskService.FailTask(r.Context(), parseUUID(taskID), req.Error, req.SessionID, req.WorkDir)
 	if err != nil {
 		slog.Warn("fail task failed", "task_id", taskID, "error", err)
 		writeError(w, http.StatusBadRequest, err.Error())

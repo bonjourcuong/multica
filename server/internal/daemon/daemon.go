@@ -790,7 +790,7 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	if err := d.client.StartTask(ctx, task.ID); err != nil {
 		taskLog.Error("start task failed", "error", err)
-		if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("start task failed: %s", err.Error())); failErr != nil {
+		if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("start task failed: %s", err.Error()), "", ""); failErr != nil {
 			taskLog.Error("fail task after start error", "error", failErr)
 		}
 		return
@@ -835,7 +835,9 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	if err != nil {
 		taskLog.Error("task failed", "error", err)
-		if failErr := d.client.FailTask(ctx, task.ID, err.Error()); failErr != nil {
+		// runTask returned without a TaskResult, so we don't have a SessionID
+		// to forward — best we can do is record the failure.
+		if failErr := d.client.FailTask(ctx, task.ID, err.Error(), "", ""); failErr != nil {
 			taskLog.Error("fail task callback failed", "error", failErr)
 		}
 		return
@@ -860,14 +862,18 @@ func (d *Daemon) handleTask(ctx context.Context, task Task) {
 
 	switch result.Status {
 	case "blocked":
-		if err := d.client.FailTask(ctx, task.ID, result.Comment); err != nil {
+		// Forward SessionID/WorkDir even on the blocked path: the agent may
+		// have built a real session before getting stuck (rate-limit, tool
+		// error, etc.) and we want the next chat turn to resume there
+		// rather than start over and "forget" the conversation.
+		if err := d.client.FailTask(ctx, task.ID, result.Comment, result.SessionID, result.WorkDir); err != nil {
 			taskLog.Error("report blocked task failed", "error", err)
 		}
 	default:
 		taskLog.Info("task completed", "status", result.Status)
 		if err := d.client.CompleteTask(ctx, task.ID, result.Comment, result.BranchName, result.SessionID, result.WorkDir); err != nil {
 			taskLog.Error("complete task failed, falling back to fail", "error", err)
-			if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("complete task failed: %s", err.Error())); failErr != nil {
+			if failErr := d.client.FailTask(ctx, task.ID, fmt.Sprintf("complete task failed: %s", err.Error()), result.SessionID, result.WorkDir); failErr != nil {
 				taskLog.Error("fail task fallback also failed", "error", failErr)
 			}
 		}

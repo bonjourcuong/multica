@@ -59,7 +59,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		executor = candidate
 	}
 
-	taskSvc := service.NewTaskService(queries, hub, bus)
+	taskSvc := service.NewTaskService(queries, txStarter, hub, bus)
 	return &Handler{
 		Queries:          queries,
 		DB:               executor,
