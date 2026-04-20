@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/logger"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
@@ -200,6 +201,15 @@ func (h *Handler) CreateWorkspace(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "failed to create workspace")
 		return
 	}
+
+	// is_first_workspace distinguishes the "brand-new user just activated" flow
+	// from a returning user spinning up a second workspace. A post-commit
+	// ListWorkspaces count of 1 means this is the user's first.
+	isFirstWorkspace := false
+	if wss, listErr := h.Queries.ListWorkspaces(r.Context(), parseUUID(userID)); listErr == nil {
+		isFirstWorkspace = len(wss) == 1
+	}
+	h.Analytics.Capture(analytics.WorkspaceCreated(userID, uuidToString(ws.ID), isFirstWorkspace))
 
 	slog.Info("workspace created", append(logger.RequestAttrs(r), "workspace_id", uuidToString(ws.ID), "name", ws.Name, "slug", ws.Slug)...)
 	writeJSON(w, http.StatusCreated, workspaceToResponse(ws))

@@ -18,6 +18,7 @@ import (
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgtype"
+	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/logger"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
@@ -89,29 +90,48 @@ func (h *Handler) issueJWT(user db.User) (string, error) {
 	return token.SignedString(auth.JWTSecret())
 }
 
-func (h *Handler) findOrCreateUser(ctx context.Context, email string) (db.User, error) {
-	user, err := h.Queries.GetUserByEmail(ctx, email)
-	isNewUser := isNotFound(err)
-	if err != nil && !isNewUser {
-		return db.User{}, err
+// findOrCreateUser returns the existing user for an email, or creates one if
+// none exists. isNew reports whether this call created the user — the signup
+// event fires on that edge, covering both the verification-code and Google
+// OAuth entry points.
+func (h *Handler) findOrCreateUser(ctx context.Context, email string) (user db.User, isNew bool, err error) {
+	user, err = h.Queries.GetUserByEmail(ctx, email)
+	isNew = isNotFound(err)
+	if err != nil && !isNew {
+		return db.User{}, false, err
 	}
 
-	if err := h.checkSignupAllowed(email, isNewUser); err != nil {
-		return db.User{}, err
+	if err := h.checkSignupAllowed(email, isNew); err != nil {
+		return db.User{}, false, err
 	}
 
-	if !isNewUser {
-		return user, nil
+	if !isNew {
+		return user, false, nil
 	}
 
 	name := email
 	if at := strings.Index(email, "@"); at > 0 {
 		name = email[:at]
 	}
-	return h.Queries.CreateUser(ctx, db.CreateUserParams{
+	created, err := h.Queries.CreateUser(ctx, db.CreateUserParams{
 		Name:  name,
 		Email: email,
 	})
+	if err != nil {
+		return db.User{}, false, err
+	}
+	return created, true, nil
+}
+
+// signupSourceFromRequest reads the attribution cookie the web frontend sets
+// on the first pageview (UTM + referrer bundle). Empty string is fine —
+// PostHog person_properties can be filled later via the frontend identify().
+func signupSourceFromRequest(r *http.Request) string {
+	c, err := r.Cookie("multica_signup_source")
+	if err != nil || c == nil {
+		return ""
+	}
+	return c.Value
 }
 
 func (h *Handler) checkSignupAllowed(email string, isNewUser bool) error {
@@ -272,7 +292,7 @@ func (h *Handler) VerifyCode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.findOrCreateUser(r.Context(), email)
+	user, isNew, err := h.findOrCreateUser(r.Context(), email)
 	if err != nil {
 		var signupErr SignupError
 		if errors.As(err, &signupErr) {
@@ -281,6 +301,9 @@ func (h *Handler) VerifyCode(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create user")
 		return
+	}
+	if isNew {
+		h.Analytics.Capture(analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r)))
 	}
 
 	tokenString, err := h.issueJWT(user)
@@ -433,7 +456,7 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 
 	email := strings.ToLower(strings.TrimSpace(gUser.Email))
 
-	user, err := h.findOrCreateUser(r.Context(), email)
+	user, isNew, err := h.findOrCreateUser(r.Context(), email)
 	if err != nil {
 		var signupErr SignupError
 		if errors.As(err, &signupErr) {
@@ -442,6 +465,11 @@ func (h *Handler) GoogleLogin(w http.ResponseWriter, r *http.Request) {
 		}
 		writeError(w, http.StatusInternalServerError, "failed to create user")
 		return
+	}
+	if isNew {
+		evt := analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r))
+		evt.Properties["auth_method"] = "google"
+		h.Analytics.Capture(evt)
 	}
 
 	// Update name and avatar from Google profile if the user was just created
