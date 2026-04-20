@@ -17,19 +17,23 @@ func applyPoolSizing(t *testing.T, dbURL string, envMax, envMin string) (max, mi
 	}
 	urlParams := poolParamsFromURL(dbURL)
 
+	maxFallback := defaultMaxConns
+	if urlParams["pool_max_conns"] {
+		maxFallback = cfg.MaxConns
+	}
 	if envMax != "" {
 		t.Setenv("DATABASE_MAX_CONNS", envMax)
-		cfg.MaxConns = envInt32("DATABASE_MAX_CONNS", cfg.MaxConns)
-	} else if !urlParams["pool_max_conns"] {
-		cfg.MaxConns = defaultMaxConns
 	}
+	cfg.MaxConns = envInt32("DATABASE_MAX_CONNS", maxFallback)
 
+	minFallback := defaultMinConns
+	if urlParams["pool_min_conns"] {
+		minFallback = cfg.MinConns
+	}
 	if envMin != "" {
 		t.Setenv("DATABASE_MIN_CONNS", envMin)
-		cfg.MinConns = envInt32("DATABASE_MIN_CONNS", cfg.MinConns)
-	} else if !urlParams["pool_min_conns"] {
-		cfg.MinConns = defaultMinConns
 	}
+	cfg.MinConns = envInt32("DATABASE_MIN_CONNS", minFallback)
 
 	if cfg.MinConns > cfg.MaxConns {
 		cfg.MinConns = cfg.MaxConns
@@ -73,14 +77,27 @@ func TestPoolSizing_PartialURLParam(t *testing.T) {
 	}
 }
 
-func TestPoolSizing_InvalidEnvFallsBack(t *testing.T) {
-	// Invalid env value falls back to whatever was already on cfg (URL or
-	// pgx default). With no URL param, that's the pgx default — but our
-	// code path then keeps it as-is, since the env is non-empty. This
-	// documents the chosen behavior so a future change is intentional.
-	max, _ := applyPoolSizing(t, "postgres://u:p@h/db?sslmode=disable", "not-a-number", "")
-	if max <= 0 {
-		t.Fatalf("invalid env should not produce non-positive max_conns; got %d", max)
+func TestPoolSizing_InvalidEnvFallsBackToCodeDefault(t *testing.T) {
+	// Invalid env value with no URL pool param → code default, NOT pgx's
+	// built-in 4. This is the regression that was fixed; pinning it here
+	// so we don't silently fall back to the bad value again.
+	max, min := applyPoolSizing(t, "postgres://u:p@h/db?sslmode=disable", "not-a-number", "")
+	if max != defaultMaxConns {
+		t.Fatalf("invalid env should fall back to code default; got max=%d, want %d", max, defaultMaxConns)
+	}
+	if min != defaultMinConns {
+		t.Fatalf("got min=%d, want %d", min, defaultMinConns)
+	}
+}
+
+func TestPoolSizing_InvalidEnvFallsBackToURLParam(t *testing.T) {
+	// Invalid env value with a URL pool param → URL param wins, NOT pgx
+	// default. This is what makes the precedence chain end at "URL or code
+	// default" rather than at "pgx default" on misconfiguration.
+	url := "postgres://u:p@h/db?sslmode=disable&pool_max_conns=40"
+	max, _ := applyPoolSizing(t, url, "not-a-number", "")
+	if max != 40 {
+		t.Fatalf("invalid env should fall back to URL param; got max=%d, want 40", max)
 	}
 }
 

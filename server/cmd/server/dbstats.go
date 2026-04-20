@@ -60,17 +60,21 @@ func newDBPool(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
 
 	urlParams := poolParamsFromURL(dbURL)
 
-	if env := os.Getenv("DATABASE_MAX_CONNS"); env != "" {
-		cfg.MaxConns = envInt32("DATABASE_MAX_CONNS", cfg.MaxConns)
-	} else if !urlParams["pool_max_conns"] {
-		cfg.MaxConns = defaultMaxConns
+	// Compute the non-env fallback first: honor URL pool_* params if the
+	// operator set them, otherwise use our code default. This fallback is
+	// also what an *invalid* env value falls back to — never pgx's built-in
+	// default of 4/0, which is the value that caused the prod incident.
+	maxFallback := defaultMaxConns
+	if urlParams["pool_max_conns"] {
+		maxFallback = cfg.MaxConns
 	}
+	cfg.MaxConns = envInt32("DATABASE_MAX_CONNS", maxFallback)
 
-	if env := os.Getenv("DATABASE_MIN_CONNS"); env != "" {
-		cfg.MinConns = envInt32("DATABASE_MIN_CONNS", cfg.MinConns)
-	} else if !urlParams["pool_min_conns"] {
-		cfg.MinConns = defaultMinConns
+	minFallback := defaultMinConns
+	if urlParams["pool_min_conns"] {
+		minFallback = cfg.MinConns
 	}
+	cfg.MinConns = envInt32("DATABASE_MIN_CONNS", minFallback)
 
 	if cfg.MinConns > cfg.MaxConns {
 		cfg.MinConns = cfg.MaxConns
