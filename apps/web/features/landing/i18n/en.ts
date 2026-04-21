@@ -288,19 +288,14 @@ export const en: LandingDict = {
         title: "Analytics Pipeline, Desktop Cross-Platform Packaging & Board Pagination",
         changes: [],
         features: [
-          "Full PostHog analytics pipeline with 6 funnel events for activation tracking (MUL-1122)",
+          "Full PostHog analytics pipeline with 6 activation funnel events (MUL-1122)",
           "Desktop app cross-platform packaging — build macOS, Windows, and Linux artifacts from a single release pipeline",
           "Issue board paginates every status column, not only Done — large backlogs stay responsive",
-          "`multica update` self-update command and a persistent Windows daemon that survives terminal close",
         ],
         fixes: [
           "Inbox no longer auto-archives an issue when you delete it, and stops remounting `IssueDetail` on every new comment or reaction (MUL-1199)",
           "Agent tasks triggered by a comment now reliably synthesize a result comment, so replies reach the issue instead of dying in terminal output",
           "Comment Markdown is preserved end-to-end — the HTML sanitizer that was stripping formatting has been removed",
-          "Desktop shareable URLs default to the local web origin in dev, desktop packaging PATH lookup is hardened, and daemon now enforces workspace isolation for agent execution",
-          "OpenClaw agent runtime reads the real model from `meta.agentMeta.model` instead of guessing, and skills.sh handles nested directory imports",
-          "Issue list queries include `description` so board cards render their preview, and attachment links prefer the CDN domain over the raw endpoint",
-          "PostHog autocapture and session recording disabled by default to reduce noise and protect privacy",
         ],
       },
       {

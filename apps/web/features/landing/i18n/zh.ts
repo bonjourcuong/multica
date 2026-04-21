@@ -291,16 +291,11 @@ export const zh: LandingDict = {
           "完整接入 PostHog 埋点，新增 6 个激活漏斗事件（MUL-1122）",
           "桌面应用跨平台打包——同一条发布流水线同时产出 macOS、Windows 和 Linux 安装包",
           "Issue 看板所有状态列都支持分页（不再只是 Done 列），大积压下依然流畅",
-          "`multica update` 自更新命令，Windows 下 Daemon 支持在终端关闭后继续常驻",
         ],
         fixes: [
           "收件箱删除 Issue 时不再自动归档；新评论或新表情反应不再导致 `IssueDetail` 重新挂载（MUL-1199）",
           "评论触发的 Agent 任务现在可靠地生成结果评论，回复进入 Issue 而不是只留在终端",
           "评论 Markdown 全链路保留——移除会误伤格式的 HTML sanitizer",
-          "桌面应用开发模式下分享链接默认指向本地 Web；桌面打包 PATH 查找更稳；Daemon 现在对 Agent 执行强制工作区隔离",
-          "OpenClaw Agent 改为从 `meta.agentMeta.model` 读取真实模型；`skills.sh` 正确处理嵌套目录导入",
-          "Issue 列表查询默认带上 `description`，看板卡片摘要正常显示；附件链接优先使用 CDN 域名",
-          "默认关闭 PostHog 的自动采集和会话回放，降噪并保护隐私",
         ],
       },
       {
