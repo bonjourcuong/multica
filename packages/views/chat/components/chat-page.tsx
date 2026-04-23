@@ -55,7 +55,9 @@ export function ChatPage() {
   const user = useAuthStore((s) => s.user);
   const { data: agents = [] } = useQuery(agentListOptions(wsId));
   const { data: members = [] } = useQuery(memberListOptions(wsId));
-  const { data: sessions = [] } = useQuery(chatSessionsOptions(wsId));
+  const { data: sessions = [], isSuccess: sessionsLoaded } = useQuery(
+    chatSessionsOptions(wsId),
+  );
   const { data: allSessions = [] } = useQuery(allChatSessionsOptions(wsId));
   const { data: rawMessages, isLoading: messagesLoading } = useQuery(
     chatMessagesOptions(activeSessionId ?? ""),
@@ -87,16 +89,20 @@ export function ChatPage() {
     availableAgents[0] ??
     null;
 
-  // Restore most recent active session once on mount.
+  // Restore most recent active session once the session query resolves.
+  // The ref is set only AFTER we've seen a successful query — setting it
+  // unconditionally on first render would lose the restore whenever the
+  // page mounts before the query returns (cold-start / direct navigate).
   const didRestoreRef = useRef(false);
   useEffect(() => {
     if (didRestoreRef.current) return;
+    if (!sessionsLoaded) return;
     didRestoreRef.current = true;
-    if (activeSessionId || sessions.length === 0) return;
+    if (activeSessionId) return;
     const latest = sessions.find((s) => s.status === "active");
     if (latest) setActiveSession(latest.id);
     // eslint-disable-next-line react-hooks/exhaustive-deps -- run once when sessions load
-  }, [sessions]);
+  }, [sessionsLoaded, sessions]);
 
   // Auto mark-as-read whenever the viewer is on a session with unread.
   const currentHasUnread =

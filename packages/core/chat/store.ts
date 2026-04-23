@@ -78,12 +78,20 @@ export interface ChatState {
    * the preference survives workspace switches and reloads.
    */
   focusMode: boolean;
+  /**
+   * Last location where a context anchor could be derived (issue/project/inbox).
+   * Updated globally by useAnchorTracker; used as a fallback for the Chat page
+   * which is its own route and therefore has no anchor of its own.
+   * Not persisted — resets per session; focus mode itself persists.
+   */
+  lastAnchorLocation: { pathname: string; search: string } | null;
   setActiveSession: (id: string | null) => void;
   setSelectedAgentId: (id: string) => void;
   /** sessionId accepts a real session UUID or DRAFT_NEW_SESSION. */
   setInputDraft: (sessionId: string, draft: string) => void;
   clearInputDraft: (sessionId: string) => void;
   setFocusMode: (on: boolean) => void;
+  setLastAnchorLocation: (loc: { pathname: string; search: string } | null) => void;
 }
 
 export interface ChatStoreOptions {
@@ -103,6 +111,8 @@ export function createChatStore(options: ChatStoreOptions) {
     selectedAgentId: storage.getItem(wsKey(AGENT_STORAGE_KEY)),
     inputDrafts: readDrafts(storage, wsKey(DRAFTS_KEY)),
     focusMode: storage.getItem(FOCUS_MODE_KEY) === "true",
+    lastAnchorLocation: null,
+    setLastAnchorLocation: (loc) => set({ lastAnchorLocation: loc }),
     setActiveSession: (id) => {
       logger.info("setActiveSession", { from: get().activeSessionId, to: id });
       if (id) {
