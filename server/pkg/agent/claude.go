@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -97,10 +98,16 @@ func (b *claudeBackend) Execute(ctx context.Context, prompt string, opts ExecOpt
 		return nil, fmt.Errorf("start claude: %w", err)
 	}
 	if err := writeClaudeInput(stdin, prompt); err != nil {
+		// claude almost certainly died during startup (broken pipe). The
+		// real reason is sitting in stderrBuf — surface it the same way the
+		// post-handshake error path does, otherwise the daemon log is the
+		// only place that knows whether it was a V8 abort, a missing native
+		// module, or anything else. cmd.Wait() flushes os/exec's stderr
+		// copy goroutine, so stderrBuf.Tail() is safe to read.
 		closeStdin()
 		cancel()
 		_ = cmd.Wait()
-		return nil, fmt.Errorf("write claude input: %w", err)
+		return nil, errors.New(withAgentStderr(fmt.Sprintf("write claude input: %v", err), "claude", stderrBuf.Tail()))
 	}
 	closeStdin()
 
