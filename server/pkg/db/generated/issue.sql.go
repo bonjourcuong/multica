@@ -467,10 +467,10 @@ JOIN member    m ON m.workspace_id = i.workspace_id
 WHERE m.user_id = $1
   AND ($3::uuid[] IS NULL OR i.workspace_id = ANY($3::uuid[]))
   AND (
-    $4::bool IS TRUE
-      AND i.status NOT IN ('done', 'cancelled')
+    ($4::bool IS TRUE
+      AND i.status NOT IN ('done', 'cancelled'))
     OR ($4::bool IS NOT TRUE
-        AND ($5::text[] IS NULL OR i.status = ANY($5::text[])))
+      AND ($5::text[] IS NULL OR i.status = ANY($5::text[])))
   )
   AND ($6::text[] IS NULL OR i.priority = ANY($6::text[]))
   AND ($7::uuid[] IS NULL OR i.assignee_id = ANY($7::uuid[]))

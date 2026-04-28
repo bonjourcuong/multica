@@ -322,20 +322,19 @@ func (h *Handler) ListCrossWorkspaceIssues(w http.ResponseWriter, r *http.Reques
 		nextCursor = &c
 	}
 
-	// workspace_count is the size of the user's membership set after the
-	// optional workspace_ids intersection. We approximate it from the rows
-	// returned plus the explicit filter — a user who ended up with 0 rows
-	// could still have many memberships, so we count distinct workspaces in
-	// the result page. This is good enough for log telemetry; the real
-	// workspace count is available via /api/workspaces.
-	wsCount := len(idsByWS)
+	// result_workspace_count is the number of distinct workspaces the result
+	// page touched, NOT the user's full membership cardinality — a user with
+	// many memberships and a tight filter still produces a small number here.
+	// Logged for telemetry; the authoritative membership count is at
+	// /api/workspaces.
+	resultWSCount := len(idsByWS)
 
 	durationMs := time.Since(start).Milliseconds()
 
 	slog.Info("list cross-workspace issues",
 		"endpoint", "/api/issues/cross-workspace",
 		"user_id", userID,
-		"workspace_count", wsCount,
+		"result_workspace_count", resultWSCount,
 		"filter_workspace_ids", len(workspaceIDs),
 		"result_count", len(resp),
 		"duration_ms", durationMs,

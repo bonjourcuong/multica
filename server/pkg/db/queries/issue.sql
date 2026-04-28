@@ -154,10 +154,10 @@ JOIN member    m ON m.workspace_id = i.workspace_id
 WHERE m.user_id = $1
   AND (sqlc.narg('workspace_ids')::uuid[] IS NULL OR i.workspace_id = ANY(sqlc.narg('workspace_ids')::uuid[]))
   AND (
-    sqlc.narg('open_only')::bool IS TRUE
-      AND i.status NOT IN ('done', 'cancelled')
+    (sqlc.narg('open_only')::bool IS TRUE
+      AND i.status NOT IN ('done', 'cancelled'))
     OR (sqlc.narg('open_only')::bool IS NOT TRUE
-        AND (sqlc.narg('statuses')::text[] IS NULL OR i.status = ANY(sqlc.narg('statuses')::text[])))
+      AND (sqlc.narg('statuses')::text[] IS NULL OR i.status = ANY(sqlc.narg('statuses')::text[])))
   )
   AND (sqlc.narg('priorities')::text[] IS NULL OR i.priority = ANY(sqlc.narg('priorities')::text[]))
   AND (sqlc.narg('assignee_ids')::uuid[] IS NULL OR i.assignee_id = ANY(sqlc.narg('assignee_ids')::uuid[]))
