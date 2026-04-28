@@ -116,3 +116,30 @@ WHERE id = $1;
 -- unread boundary stable across multiple incoming replies.
 UPDATE chat_session SET unread_since = now()
 WHERE id = $1 AND unread_since IS NULL;
+
+-- name: GetGlobalMirrorSession :one
+-- Looks up the per-workspace "Cuong Global" mirror session for a given user.
+-- Identity is (workspace_id, scope='global_mirror', creator_id), NOT the
+-- title — the user-facing name is cosmetic.
+SELECT * FROM chat_session
+WHERE workspace_id = $1
+  AND scope = 'global_mirror'
+  AND creator_id = $2
+LIMIT 1;
+
+-- name: CreateGlobalMirrorSession :one
+-- Creates the workspace-side "Cuong Global" mirror session. agent_id points
+-- at the workspace-resident global mirror agent (pre-existing in the
+-- workspace) — for V1 we reuse the user's workspace-default agent, which
+-- the dispatch service resolves before calling this. The cosmetic title is
+-- "Cuong Global"; lookup is by (workspace_id, scope, creator_id).
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, scope)
+VALUES ($1, $2, $3, 'Cuong Global', 'global_mirror')
+RETURNING *;
+
+-- name: InsertMirrorChatMessage :one
+-- Appends a message to the workspace-side mirror session. metadata carries
+-- the {global_origin: {...}} pointer back to the originating global message.
+INSERT INTO chat_message (chat_session_id, role, content, metadata)
+VALUES ($1, $2, $3, $4)
+RETURNING *;
