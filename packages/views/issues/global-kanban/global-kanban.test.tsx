@@ -1,23 +1,44 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { render, screen, fireEvent } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { CrossWorkspaceIssue } from "@multica/core/types";
+import type { CrossWorkspaceIssue, Workspace } from "@multica/core/types";
 import { NavigationProvider } from "../../navigation";
 import type { NavigationAdapter } from "../../navigation/types";
-import { GlobalKanban } from "./index";
+import { GlobalKanban, parseWorkspaceIdsParam } from "./index";
 
-const listCrossWorkspaceIssues = vi.fn<() => Promise<{
-  issues: CrossWorkspaceIssue[];
-  next_cursor: string | null;
-  has_more: boolean;
-  total_returned: number;
-}>>();
+const listCrossWorkspaceIssues = vi.fn<
+  (params?: { workspace_ids?: string[] }) => Promise<{
+    issues: CrossWorkspaceIssue[];
+    next_cursor: string | null;
+    has_more: boolean;
+    total_returned: number;
+  }>
+>();
+const listWorkspaces = vi.fn<() => Promise<Workspace[]>>();
 
 vi.mock("@multica/core/api", () => ({
   api: {
-    listCrossWorkspaceIssues: () => listCrossWorkspaceIssues(),
+    listCrossWorkspaceIssues: (params?: { workspace_ids?: string[] }) =>
+      listCrossWorkspaceIssues(params),
+    listWorkspaces: () => listWorkspaces(),
   },
 }));
+
+function makeWorkspace(over: Partial<Workspace> = {}): Workspace {
+  return {
+    id: "00000000-0000-0000-0000-0000000000aa",
+    name: "Acme",
+    slug: "acme",
+    description: null,
+    context: null,
+    settings: {},
+    repos: [],
+    issue_prefix: "ACM",
+    created_at: "2026-04-01T00:00:00Z",
+    updated_at: "2026-04-01T00:00:00Z",
+    ...over,
+  };
+}
 
 function makeIssue(over: Partial<CrossWorkspaceIssue> = {}): CrossWorkspaceIssue {
   return {
@@ -50,35 +71,63 @@ function makeIssue(over: Partial<CrossWorkspaceIssue> = {}): CrossWorkspaceIssue
   };
 }
 
-function renderKanban() {
+function renderKanban({
+  searchParams = new URLSearchParams(),
+  workspaces = [makeWorkspace()],
+}: {
+  searchParams?: URLSearchParams;
+  workspaces?: Workspace[];
+} = {}) {
+  listWorkspaces.mockResolvedValue(workspaces);
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false } },
   });
+  // Pre-seed so workspaceListOptions resolves synchronously and the filter
+  // bar paints on the first render — keeps assertions deterministic.
+  qc.setQueryData(["workspaces", "list"], workspaces);
+  const replace = vi.fn();
   const navigation: NavigationAdapter = {
     pathname: "/global",
-    searchParams: new URLSearchParams(),
+    searchParams,
     push: vi.fn(),
-    replace: vi.fn(),
+    replace,
     back: vi.fn(),
   };
-  return render(
+  const utils = render(
     <QueryClientProvider client={qc}>
       <NavigationProvider value={navigation}>
         <GlobalKanban />
       </NavigationProvider>
     </QueryClientProvider>,
   );
+  return { ...utils, replace };
 }
+
+describe("parseWorkspaceIdsParam", () => {
+  it("returns [] for null / empty / whitespace input", () => {
+    expect(parseWorkspaceIdsParam(null)).toEqual([]);
+    expect(parseWorkspaceIdsParam(undefined)).toEqual([]);
+    expect(parseWorkspaceIdsParam("")).toEqual([]);
+    expect(parseWorkspaceIdsParam(",,, ,")).toEqual([]);
+  });
+
+  it("splits comma-separated values and trims surrounding whitespace", () => {
+    expect(parseWorkspaceIdsParam("ws-1, ws-2 ,ws-3")).toEqual([
+      "ws-1",
+      "ws-2",
+      "ws-3",
+    ]);
+  });
+});
 
 describe("GlobalKanban", () => {
   beforeEach(() => {
     listCrossWorkspaceIssues.mockReset();
+    listWorkspaces.mockReset();
   });
 
   it("shows the skeleton while the cross-workspace query is pending", () => {
-    listCrossWorkspaceIssues.mockImplementation(
-      () => new Promise(() => {}),
-    );
+    listCrossWorkspaceIssues.mockImplementation(() => new Promise(() => {}));
     renderKanban();
     expect(
       screen.getByRole("status", { name: /loading cross-workspace kanban/i }),
@@ -122,20 +171,67 @@ describe("GlobalKanban", () => {
     });
     renderKanban();
 
-    // Column headers (5 visible columns per AC; blocked + cancelled are hidden).
     for (const label of ["Backlog", "Todo", "In Progress", "In Review", "Done"]) {
       expect(await screen.findByText(label)).toBeInTheDocument();
     }
     expect(screen.queryByText("Blocked")).not.toBeInTheDocument();
 
-    // Each card renders its workspace badge — distinct per workspace.
     expect(await screen.findByLabelText("Acme (ACM)")).toBeInTheDocument();
     expect(await screen.findByLabelText("Beta (BET)")).toBeInTheDocument();
 
-    // Cards link to the owning workspace's issue detail page.
     const acmeCard = screen.getByLabelText(/ACM-1 Backlog item \(Acme\)/);
     expect(acmeCard).toHaveAttribute("href", "/acme/issues/i1");
     const betaCard = screen.getByLabelText(/BET-7 Done item \(Beta\)/);
     expect(betaCard).toHaveAttribute("href", "/beta/issues/i2");
+  });
+
+  it("forwards the URL `workspace_ids` filter to the cross-workspace API call", async () => {
+    listCrossWorkspaceIssues.mockResolvedValueOnce({
+      issues: [],
+      next_cursor: null,
+      has_more: false,
+      total_returned: 0,
+    });
+    renderKanban({
+      searchParams: new URLSearchParams("workspace_ids=ws-1,ws-2"),
+      workspaces: [
+        makeWorkspace({ id: "ws-1", name: "Acme", slug: "acme", issue_prefix: "ACM" }),
+        makeWorkspace({ id: "ws-2", name: "Beta", slug: "beta", issue_prefix: "BET" }),
+      ],
+    });
+    expect(
+      await screen.findByText(/no issues match the current filter/i),
+    ).toBeInTheDocument();
+    expect(listCrossWorkspaceIssues).toHaveBeenCalledWith(
+      expect.objectContaining({ workspace_ids: ["ws-1", "ws-2"] }),
+    );
+  });
+
+  it("toggling a workspace chip pushes the new set into the URL via NavigationAdapter.replace", async () => {
+    listCrossWorkspaceIssues.mockResolvedValue({
+      issues: [],
+      next_cursor: null,
+      has_more: false,
+      total_returned: 0,
+    });
+    const { replace } = renderKanban({
+      workspaces: [
+        makeWorkspace({ id: "ws-1", name: "Acme", slug: "acme", issue_prefix: "ACM" }),
+        makeWorkspace({ id: "ws-2", name: "Beta", slug: "beta", issue_prefix: "BET" }),
+      ],
+    });
+
+    fireEvent.click(screen.getByTestId("workspace-filter-chip-acme"));
+    expect(replace).toHaveBeenCalledWith("/global?workspace_ids=ws-1");
+  });
+
+  it("hides the filter bar entirely when the user only belongs to one workspace", () => {
+    listCrossWorkspaceIssues.mockImplementation(() => new Promise(() => {}));
+    renderKanban({
+      workspaces: [makeWorkspace({ id: "ws-only", name: "Solo", slug: "solo" })],
+    });
+    expect(
+      screen.queryByRole("group", { name: /workspace filter/i }),
+    ).toBeNull();
   });
 });
