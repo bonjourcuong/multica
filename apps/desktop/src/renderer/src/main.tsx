@@ -13,19 +13,17 @@ import "@fontsource/geist-mono/400.css";
 import "@fontsource/geist-mono/700.css";
 import "./globals.css";
 
-// Match apps/web's theme-reset-v3 cleanup: next-themes 0.4.6 with
-// enableSystem can leave a stale .dark class on <html> when the OS is in
-// dark mode, even after explicit theme=light is stored. Clear stale theme
-// classes and force theme=light once per install. See apps/web/app/layout.tsx
-// for the full explanation. Bump the version suffix to re-fire for everyone.
+// Keep the initial DOM class in sync with next-themes before React mounts.
 try {
-  if (localStorage.getItem("theme-reset-v3") !== "1") {
-    localStorage.setItem("theme", "light");
-    localStorage.setItem("theme-reset-v3", "1");
-    document.documentElement.classList.remove("dark", "light");
-  }
+  const storedTheme = localStorage.getItem("theme") ?? "light";
+  const resolvedTheme = storedTheme === "system"
+    ? window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light"
+    : storedTheme === "dark" ? "dark" : "light";
+  document.documentElement.classList.remove("dark", "light");
+  document.documentElement.classList.add(resolvedTheme);
+  document.documentElement.style.colorScheme = resolvedTheme;
 } catch {
-  // localStorage unavailable — non-fatal, next-themes still runs.
+  // localStorage unavailable; non-fatal, next-themes still runs.
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(<App />);

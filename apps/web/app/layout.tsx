@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import Script from "next/script";
 import { Inter, Geist_Mono, Source_Serif_4 } from "next/font/google";
 import { ThemeProvider } from "@/components/theme-provider";
 import { Toaster } from "@multica/ui/components/ui/sonner";
@@ -66,6 +67,9 @@ export const viewport: Viewport = {
   ],
 };
 
+const themeSyncScript =
+  "try{var t=localStorage.getItem('theme')||'light';var r=t==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):t==='dark'?'dark':'light';var d=document.documentElement;d.classList.remove('dark','light');d.classList.add(r);d.style.colorScheme=r}catch(e){}";
+
 export const metadata: Metadata = {
   metadataBase: new URL("https://www.multica.ai"),
   title: {
@@ -108,22 +112,13 @@ export default function RootLayout({
       suppressHydrationWarning
       className={cn("antialiased font-sans h-full", inter.variable, geistMono.variable, sourceSerif.variable)}
     >
+      {/* beforeInteractive is emitted in <head>, ahead of next-themes' body script. */}
+      <Script
+        id="multica-theme-sync"
+        strategy="beforeInteractive"
+        dangerouslySetInnerHTML={{ __html: themeSyncScript }}
+      />
       <body className="h-full overflow-hidden">
-        {/* One-shot reset: force-sets the stored theme to light AND wipes
-            any stale theme classes (.dark/.light) that next-themes leaves on
-            <html> when prefers-color-scheme is dark. Without this cleanup,
-            next-themes hydrates with theme=light but the FOUC-prevention
-            script's earlier .dark class survives, producing 'light dark' on
-            <html> simultaneously — .dark wins in the cascade and the page
-            renders dark despite theme=light. Runs synchronously before
-            next-themes hydrates. Bump the version suffix to re-fire for
-            everyone. */}
-        <script
-          dangerouslySetInnerHTML={{
-            __html:
-              "try{if(localStorage.getItem('theme-reset-v3')!=='1'){localStorage.setItem('theme','light');localStorage.setItem('theme-reset-v3','1');document.documentElement.classList.remove('dark','light')}}catch(e){}",
-          }}
-        />
         <LocaleSync />
         <ThemeProvider>
           <WebProviders>
