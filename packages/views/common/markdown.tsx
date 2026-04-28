@@ -36,6 +36,8 @@ function defaultRenderMention({
  */
 export function Markdown(props: MarkdownProps): React.JSX.Element {
   const cdnDomain = useConfigStore((s) => s.cdnDomain);
+  // `props` spreads last so callers can override (e.g. resolveImageSrc for the
+  // Documents viewer, or a custom renderMention for tests).
   return <MarkdownBase renderMention={defaultRenderMention} cdnDomain={cdnDomain} {...props} />;
 }
 

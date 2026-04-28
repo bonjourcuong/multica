@@ -18,6 +18,7 @@ import { SkillsPage } from "@multica/views/skills";
 import { DesktopRuntimesPage } from "./components/desktop-runtimes-page";
 import { AgentsPage } from "@multica/views/agents";
 import { InboxPage } from "@multica/views/inbox";
+import { DocumentsPage } from "@multica/views/documents";
 import { ChatPage } from "@multica/views/chat";
 import { SettingsPage } from "@multica/views/settings";
 import { Download, Server } from "lucide-react";
@@ -126,6 +127,11 @@ export const appRoutes: RouteObject[] = [
           },
           { path: "agents", element: <AgentsPage />, handle: { title: "Agents" } },
           { path: "inbox", element: <InboxPage />, handle: { title: "Inbox" } },
+          {
+            path: "documents",
+            element: <DocumentsPage />,
+            handle: { title: "Documents" },
+          },
           { path: "chat", element: <ChatPage />, handle: { title: "Chat" } },
           {
             path: "settings",

@@ -73,6 +73,8 @@ import type {
   ListAutopilotsResponse,
   GetAutopilotResponse,
   ListAutopilotRunsResponse,
+  DocumentTree,
+  DocumentFile,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -153,12 +155,19 @@ export interface ImportStarterContentResponse {
 export class ApiError extends Error {
   readonly status: number;
   readonly statusText: string;
+  /**
+   * Stable machine-readable error identifier set by the server (e.g.
+   * "pkm_not_configured"). Optional — only some endpoints return one.
+   * Prefer checking `code` over parsing `message`, which is human copy.
+   */
+  readonly code?: string;
 
-  constructor(message: string, status: number, statusText: string) {
+  constructor(message: string, status: number, statusText: string, code?: string) {
     super(message);
     this.name = "ApiError";
     this.status = status;
     this.statusText = statusText;
+    this.code = code;
   }
 }
 
@@ -213,14 +222,16 @@ export class ApiClient {
     this.options.onUnauthorized?.();
   }
 
-  private async parseErrorMessage(res: Response, fallback: string): Promise<string> {
+  private async parseError(res: Response, fallback: string): Promise<{ message: string; code?: string }> {
     try {
-      const data = await res.json() as { error?: string };
-      if (typeof data.error === "string" && data.error) return data.error;
+      const data = await res.json() as { error?: string; code?: string };
+      const message = typeof data.error === "string" && data.error ? data.error : fallback;
+      const code = typeof data.code === "string" && data.code ? data.code : undefined;
+      return { message, code };
     } catch {
       // Ignore non-JSON error bodies.
     }
-    return fallback;
+    return { message: fallback };
   }
 
   private async fetch<T>(path: string, init?: RequestInit): Promise<T> {
@@ -245,10 +256,10 @@ export class ApiClient {
 
     if (!res.ok) {
       if (res.status === 401) this.handleUnauthorized();
-      const message = await this.parseErrorMessage(res, `API error: ${res.status} ${res.statusText}`);
+      const { message, code } = await this.parseError(res, `API error: ${res.status} ${res.statusText}`);
       const logLevel = res.status === 404 ? "warn" : "error";
       this.logger[logLevel](`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms`, error: message });
-      throw new ApiError(message, res.status, res.statusText);
+      throw new ApiError(message, res.status, res.statusText, code);
     }
 
     this.logger.info(`← ${res.status} ${path}`, { rid, duration: `${Date.now() - start}ms` });
@@ -911,7 +922,7 @@ export class ApiClient {
 
     if (!res.ok) {
       if (res.status === 401) this.handleUnauthorized();
-      const message = await this.parseErrorMessage(res, `Upload failed: ${res.status}`);
+      const { message } = await this.parseError(res, `Upload failed: ${res.status}`);
       this.logger.error(`← ${res.status} /api/upload-file`, { rid, duration: `${Date.now() - start}ms`, error: message });
       throw new Error(message);
     }
@@ -1128,5 +1139,30 @@ export class ApiClient {
 
   async deleteAutopilotTrigger(autopilotId: string, triggerId: string): Promise<void> {
     await this.fetch(`/api/autopilots/${autopilotId}/triggers/${triggerId}`, { method: "DELETE" });
+  }
+
+  // Documents — read-only PKM filesystem (MUL-16). All `path` values are
+  // RELATIVE to the workspace's configured `pkm_path`. Empty string = root.
+  async listDocumentTree(workspaceId: string, path: string): Promise<DocumentTree> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(`/api/workspaces/${workspaceId}/documents/tree?${search}`);
+  }
+
+  async getDocumentFile(workspaceId: string, path: string): Promise<DocumentFile> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(`/api/workspaces/${workspaceId}/documents/file?${search}`);
+  }
+
+  /**
+   * Build the absolute URL for an inline image referenced from a `.md` file.
+   * Returns a URL the browser can use directly in an `<img src>`. Auth/CSRF
+   * flow through cookie-based session — no extra wiring needed.
+   */
+  documentImageUrl(workspaceId: string, path: string): string {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return `${this.baseUrl}/api/workspaces/${workspaceId}/documents/image?${search}`;
   }
 }

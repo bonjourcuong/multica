@@ -59,6 +59,16 @@ export interface MarkdownProps {
    * When provided, enables file card preprocessing and rendering.
    */
   cdnDomain?: string
+  /**
+   * Optional rewriter for image src attributes — runs after parsing, before
+   * the <img> is rendered. Lets callers map relative references (e.g.
+   * "../img/cover.png" inside a PKM markdown file) to absolute URLs against
+   * a backend endpoint. Return `undefined` to leave the src unchanged.
+   *
+   * Absolute URLs (http(s)://, data:, blob:) are passed through as well so
+   * the resolver can opt out by inspecting the input.
+   */
+  resolveImageSrc?: (src: string) => string | undefined
 }
 
 // Sanitization schema — extends GitHub defaults to allow code highlighting classes
@@ -112,6 +122,7 @@ function createComponents(
   onUrlClick?: (url: string) => void,
   onFileClick?: (path: string) => void,
   renderMention?: (props: { type: string; id: string }) => React.ReactNode,
+  resolveImageSrc?: (src: string) => string | undefined,
 ): Partial<Components> {
   const baseComponents: Partial<Components> = {
     // FileCard: intercept <div data-type="fileCard"> from preprocessFileCards
@@ -142,15 +153,20 @@ function createComponents(
       }
       return <div {...props}>{children}</div>
     },
-    // Images: render uploaded images with constrained sizing
-    img: ({ src, alt }) => (
-      <img
-        src={src}
-        alt={alt ?? ""}
-        className="max-w-full h-auto rounded-md my-2"
-        loading="lazy"
-      />
-    ),
+    // Images: render uploaded images with constrained sizing. When a
+    // resolver is provided, give it a chance to rewrite the src (used by
+    // the Documents viewer to resolve PKM-relative paths).
+    img: ({ src, alt }) => {
+      const resolved = resolveImageSrc && typeof src === "string" ? resolveImageSrc(src) : undefined
+      return (
+        <img
+          src={resolved ?? src}
+          alt={alt ?? ""}
+          className="max-w-full h-auto rounded-md my-2"
+          loading="lazy"
+        />
+      )
+    },
     // Links: Make clickable with callbacks, or render as mention
     a: ({ href, children }) => {
       // Mention links: mention://member/id, mention://agent/id, mention://issue/id, mention://all/all
@@ -384,11 +400,12 @@ export function Markdown({
   onUrlClick,
   onFileClick,
   renderMention,
-  cdnDomain
+  cdnDomain,
+  resolveImageSrc
 }: MarkdownProps): React.JSX.Element {
   const components = React.useMemo(
-    () => createComponents(mode, onUrlClick, onFileClick, renderMention),
-    [mode, onUrlClick, onFileClick, renderMention]
+    () => createComponents(mode, onUrlClick, onFileClick, renderMention, resolveImageSrc),
+    [mode, onUrlClick, onFileClick, renderMention, resolveImageSrc]
   )
 
   // Preprocess: convert mention shortcodes, raw URLs, and file cards to renderable content

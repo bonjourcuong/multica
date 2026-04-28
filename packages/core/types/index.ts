@@ -48,6 +48,13 @@ export type { IssueSubscriber } from "./subscriber";
 export type * from "./events";
 export type * from "./api";
 export type { Attachment } from "./attachment";
+export type {
+  DocumentEntryType,
+  DocumentEntry,
+  DocumentTree,
+  DocumentFile,
+} from "./document";
+export { PKM_NOT_CONFIGURED_CODE } from "./document";
 export type { ChatSession, ChatMessage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse } from "./chat";
 export type { StorageAdapter } from "./storage";
 export type { Project, ProjectStatus, ProjectPriority, CreateProjectRequest, UpdateProjectRequest, ListProjectsResponse } from "./project";

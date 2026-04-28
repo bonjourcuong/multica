@@ -29,6 +29,7 @@ import {
   SquarePen,
   CircleUser,
   FolderKanban,
+  FolderTree,
   MessageSquare,
   Loader2,
   X,
@@ -104,6 +105,7 @@ const EMPTY_CHAT_SESSIONS: Awaited<ReturnType<typeof api.listChatSessions>> = []
 // Only parameterless paths are valid nav destinations.
 type NavKey =
   | "inbox"
+  | "documents"
   | "chat"
   | "myIssues"
   | "issues"
@@ -116,6 +118,7 @@ type NavKey =
 
 const personalNav: { key: NavKey; label: string; icon: typeof Inbox }[] = [
   { key: "inbox", label: "Inbox", icon: Inbox },
+  { key: "documents", label: "Documents", icon: FolderTree },
   { key: "chat", label: "Chat", icon: MessageSquare },
   { key: "myIssues", label: "My Issues", icon: CircleUser },
 ];
