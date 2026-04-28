@@ -185,8 +185,9 @@ func isInside(ancestor, descendant string) bool {
 // Entry describes one item in a directory listing.
 type Entry struct {
 	Name    string    `json:"name"`
-	Type    string    `json:"type"` // "dir" or "file"
-	Size    int64     `json:"size"`
+	Path    string    `json:"path"` // relative to pkm_path, e.g. "GROWTH/README.md"
+	Type    string    `json:"type"` // "folder" or "file"
+	Size    int64     `json:"size,omitempty"`
 	ModTime time.Time `json:"mtime"`
 }
 
@@ -247,7 +248,7 @@ func (r *Resolver) ListDir(absPath string) ([]Entry, error) {
 func entryFor(name string, info fs.FileInfo) Entry {
 	t := "file"
 	if info.IsDir() {
-		t = "dir"
+		t = "folder"
 	}
 	return Entry{
 		Name:    name,

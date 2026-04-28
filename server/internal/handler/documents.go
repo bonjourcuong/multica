@@ -62,7 +62,10 @@ func (h *Handler) requireDocumentsContext(w http.ResponseWriter, r *http.Request
 	}
 	pkm := workspacePKMPath(ws)
 	if pkm == "" {
-		writeError(w, http.StatusServiceUnavailable, "pkm_path not configured for this workspace")
+		writeJSON(w, http.StatusServiceUnavailable, map[string]string{
+			"error": "pkm_path not configured for this workspace",
+			"code":  "pkm_not_configured",
+		})
 		return "", false
 	}
 
@@ -123,14 +126,25 @@ func (h *Handler) GetDocumentsTree(w http.ResponseWriter, r *http.Request) {
 		mapDocumentsError(w, err)
 		return
 	}
+
+	rel := strings.TrimSpace(r.URL.Query().Get("path"))
+
+	// Populate the path field on each entry (parent + "/" + name).
+	for i := range entries {
+		if rel == "" || rel == "." {
+			entries[i].Path = entries[i].Name
+		} else {
+			entries[i].Path = rel + "/" + entries[i].Name
+		}
+	}
+
 	sort.SliceStable(entries, func(i, j int) bool {
 		if entries[i].Type != entries[j].Type {
-			return entries[i].Type == "dir"
+			return entries[i].Type == "folder"
 		}
 		return entries[i].Name < entries[j].Name
 	})
 
-	rel := strings.TrimSpace(r.URL.Query().Get("path"))
 	writeJSON(w, http.StatusOK, DocumentTreeResponse{Path: rel, Entries: entries})
 }
 
