@@ -6,18 +6,28 @@ import { TooltipProvider } from "../ui/tooltip";
 
 function ThemeClassSync() {
   const { resolvedTheme } = useTheme();
+
   useEffect(() => {
-    if (!resolvedTheme) return;
+    if (resolvedTheme !== "light" && resolvedTheme !== "dark") return;
+
     const html = document.documentElement;
-    const stale = resolvedTheme === "dark" ? "light" : "dark";
-    if (html.classList.contains(stale)) {
+    const apply = () => {
+      const stale = resolvedTheme === "dark" ? "light" : "dark";
       html.classList.remove(stale);
-    }
-    if (!html.classList.contains(resolvedTheme)) {
       html.classList.add(resolvedTheme);
-    }
-    html.style.colorScheme = resolvedTheme;
+      html.style.colorScheme = resolvedTheme;
+    };
+
+    apply();
+
+    const observer = new MutationObserver((records) => {
+      if (records.some((r) => r.attributeName === "class")) apply();
+    });
+
+    observer.observe(html, { attributes: true, attributeFilter: ["class"] });
+    return () => observer.disconnect();
   }, [resolvedTheme]);
+
   return null;
 }
 
