@@ -11,20 +11,19 @@ function ThemeClassSync() {
     if (resolvedTheme !== "light" && resolvedTheme !== "dark") return;
 
     const html = document.documentElement;
-    const apply = () => {
-      const stale = resolvedTheme === "dark" ? "light" : "dark";
+    const stale = resolvedTheme === "dark" ? "light" : "dark";
+    const observer = new MutationObserver(apply);
+
+    // Disconnect during our own writes so classList ops do not retrigger us.
+    function apply() {
+      observer.disconnect();
       html.classList.remove(stale);
       html.classList.add(resolvedTheme);
       html.style.colorScheme = resolvedTheme;
-    };
+      observer.observe(html, { attributes: true, attributeFilter: ["class"] });
+    }
 
     apply();
-
-    const observer = new MutationObserver((records) => {
-      if (records.some((r) => r.attributeName === "class")) apply();
-    });
-
-    observer.observe(html, { attributes: true, attributeFilter: ["class"] });
     return () => observer.disconnect();
   }, [resolvedTheme]);
 
