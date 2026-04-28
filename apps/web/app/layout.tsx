@@ -109,14 +109,19 @@ export default function RootLayout({
       className={cn("antialiased font-sans h-full", inter.variable, geistMono.variable, sourceSerif.variable)}
     >
       <body className="h-full overflow-hidden">
-        {/* One-shot reset: force-sets the stored theme to light so existing
-            users pick up the new default even if v1 left them on dark/system.
-            Runs synchronously before next-themes hydrates — no first-paint flash.
-            Bump the version suffix to re-fire for everyone. */}
+        {/* One-shot reset: force-sets the stored theme to light AND wipes
+            any stale theme classes (.dark/.light) that next-themes leaves on
+            <html> when prefers-color-scheme is dark. Without this cleanup,
+            next-themes hydrates with theme=light but the FOUC-prevention
+            script's earlier .dark class survives, producing 'light dark' on
+            <html> simultaneously — .dark wins in the cascade and the page
+            renders dark despite theme=light. Runs synchronously before
+            next-themes hydrates. Bump the version suffix to re-fire for
+            everyone. */}
         <script
           dangerouslySetInnerHTML={{
             __html:
-              "try{if(localStorage.getItem('theme-reset-v2')!=='1'){localStorage.setItem('theme','light');localStorage.setItem('theme-reset-v2','1')}}catch(e){}",
+              "try{if(localStorage.getItem('theme-reset-v3')!=='1'){localStorage.setItem('theme','light');localStorage.setItem('theme-reset-v3','1');document.documentElement.classList.remove('dark','light')}}catch(e){}",
           }}
         />
         <LocaleSync />
