@@ -13,13 +13,13 @@ import (
 
 const appendGlobalChatDispatchedTo = `-- name: AppendGlobalChatDispatchedTo :exec
 UPDATE global_chat_message
-SET dispatched_to = dispatched_to || $2::jsonb
-WHERE id = $1
+SET dispatched_to = dispatched_to || $1::jsonb
+WHERE id = $2
 `
 
 type AppendGlobalChatDispatchedToParams struct {
-	ID      pgtype.UUID `json:"id"`
-	Column2 []byte      `json:"column_2"`
+	Entry []byte      `json:"entry"`
+	ID    pgtype.UUID `json:"id"`
 }
 
 // Appends a dispatch record (a JSON object {workspace_id, mirror_session_id,
@@ -27,7 +27,7 @@ type AppendGlobalChatDispatchedToParams struct {
 // jsonb array. Used by GlobalDispatchService to record fan-out targets so
 // the global message remains an audit trail.
 func (q *Queries) AppendGlobalChatDispatchedTo(ctx context.Context, arg AppendGlobalChatDispatchedToParams) error {
-	_, err := q.db.Exec(ctx, appendGlobalChatDispatchedTo, arg.ID, arg.Column2)
+	_, err := q.db.Exec(ctx, appendGlobalChatDispatchedTo, arg.Entry, arg.ID)
 	return err
 }
 

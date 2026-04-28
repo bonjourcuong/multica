@@ -31,5 +31,5 @@ RETURNING *;
 -- jsonb array. Used by GlobalDispatchService to record fan-out targets so
 -- the global message remains an audit trail.
 UPDATE global_chat_message
-SET dispatched_to = dispatched_to || $2::jsonb
-WHERE id = $1;
+SET dispatched_to = dispatched_to || sqlc.arg('entry')::jsonb
+WHERE id = sqlc.arg('id');
