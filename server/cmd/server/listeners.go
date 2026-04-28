@@ -24,13 +24,15 @@ import (
 func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 	// Personal events should NOT be broadcast to the whole workspace.
 	personalEvents := map[string]bool{
-		protocol.EventInboxNew:           true,
-		protocol.EventInboxRead:          true,
-		protocol.EventInboxArchived:      true,
-		protocol.EventInboxBatchRead:     true,
-		protocol.EventInboxBatchArchived: true,
-		protocol.EventInvitationCreated:  true,
-		protocol.EventInvitationRevoked:  true,
+		protocol.EventInboxNew:             true,
+		protocol.EventInboxRead:            true,
+		protocol.EventInboxArchived:        true,
+		protocol.EventInboxBatchRead:       true,
+		protocol.EventInboxBatchArchived:   true,
+		protocol.EventInvitationCreated:    true,
+		protocol.EventInvitationRevoked:    true,
+		protocol.EventGlobalChatMessage:    true,
+		protocol.EventGlobalChatDispatched: true,
 	}
 
 	// Helper: marshal event and send to a specific user.
@@ -118,6 +120,18 @@ func registerListeners(bus *events.Bus, b realtime.Broadcaster) {
 			sendToRecipient(b, e, *uid)
 		}
 	})
+
+	// global_chat:* — per-user events with no workspace fanout. The bound
+	// user is carried explicitly on Event.UserID so the listener does not
+	// have to inspect the payload.
+	for _, eventType := range []string{
+		protocol.EventGlobalChatMessage,
+		protocol.EventGlobalChatDispatched,
+	} {
+		bus.Subscribe(eventType, func(e events.Event) {
+			sendToRecipient(b, e, e.UserID)
+		})
+	}
 
 	// member:added — also send to the invited user so they discover the new workspace.
 	// Pass excludeWorkspace so clients already in the target room (reached via

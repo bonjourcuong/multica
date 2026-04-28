@@ -19,6 +19,12 @@ type Event struct {
 	// without re-deserializing Payload. See MUL-1138 phase 1.
 	TaskID        string
 	ChatSessionID string
+
+	// UserID, when set, routes the event to the user's auto-subscribed
+	// scope (`user:{UserID}`) instead of a workspace fanout. Used by the
+	// global orchestrator chat (MUL-31), which has no workspace_id by
+	// design and must reach every connection of the bound user.
+	UserID string
 }
 
 // Handler is a function that processes an event.

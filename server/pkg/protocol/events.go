@@ -95,4 +95,36 @@ const (
 	// Daemon events
 	EventDaemonHeartbeat = "daemon:heartbeat"
 	EventDaemonRegister  = "daemon:register"
+
+	// Global chat events (per-user, no workspace_id)
+	EventGlobalChatMessage    = "global_chat:message"
+	EventGlobalChatDispatched = "global_chat:dispatched"
 )
+
+// GlobalChatMessagePayload is the realtime payload pushed when a new
+// global_chat_message lands. The frontend uses it to refresh the global
+// chat pane without a roundtrip.
+type GlobalChatMessagePayload struct {
+	GlobalSessionID string `json:"global_session_id"`
+	MessageID       string `json:"message_id"`
+	AuthorKind      string `json:"author_kind"`
+	AuthorID        string `json:"author_id"`
+	Body            string `json:"body"`
+	CreatedAt       string `json:"created_at"`
+}
+
+// GlobalChatDispatchedPayload is broadcast after a global message has been
+// dispatched into one or more workspace mirror sessions. Frontends use it to
+// flag the global message as "delivered" or surface the per-target outcome.
+type GlobalChatDispatchedPayload struct {
+	GlobalMessageID string                  `json:"global_message_id"`
+	Targets         []GlobalChatDispatchTarget `json:"targets"`
+}
+
+type GlobalChatDispatchTarget struct {
+	WorkspaceSlug   string `json:"workspace_slug"`
+	WorkspaceID     string `json:"workspace_id"`
+	MirrorSessionID string `json:"mirror_session_id"`
+	MirrorMessageID string `json:"mirror_message_id"`
+	Error           string `json:"error,omitempty"`
+}

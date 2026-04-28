@@ -241,6 +241,19 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 		// workspace ID in the URL. See ADR 0001.
 		r.Get("/api/issues/cross-workspace", h.ListCrossWorkspaceIssues)
 
+		// Global chat (per-user, no workspace context). The Cuong Pho
+		// digital-twin agent is bootstrapped on first call. Membership is
+		// enforced inside GlobalDispatchService for fan-out.
+		r.Route("/api/global/chat", func(r chi.Router) {
+			r.Post("/sessions", h.BootstrapGlobalSession)
+			r.Get("/sessions/me", h.GetGlobalSession)
+			r.Route("/sessions/me/messages", func(r chi.Router) {
+				r.Get("/", h.ListGlobalMessages)
+				r.Post("/", h.PostGlobalMessage)
+			})
+			r.Post("/cross-ws-query", h.QueryCrossWorkspaceIssues)
+		})
+
 		// User-scoped invitation routes (no workspace context required)
 		r.Get("/api/invitations", h.ListMyInvitations)
 		r.Get("/api/invitations/{id}", h.GetMyInvitation)
