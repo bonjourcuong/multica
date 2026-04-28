@@ -9,6 +9,8 @@ import type {
   CreateMemberRequest,
   UpdateMemberRequest,
   ListIssuesParams,
+  ListCrossWorkspaceIssuesParams,
+  ListCrossWorkspaceIssuesResponse,
   Agent,
   CreateAgentRequest,
   UpdateAgentRequest,
@@ -370,6 +372,26 @@ export class ApiClient {
     if (params?.project_id) search.set("project_id", params.project_id);
     if (params?.open_only) search.set("open_only", "true");
     return this.fetch(`/api/issues?${search}`);
+  }
+
+  /**
+   * Cross-workspace issue list (ADR 0001). Aggregates issues across every
+   * workspace the authenticated user belongs to. Membership is enforced
+   * server-side; unknown `workspace_ids` are silently dropped.
+   */
+  async listCrossWorkspaceIssues(
+    params?: ListCrossWorkspaceIssuesParams,
+  ): Promise<ListCrossWorkspaceIssuesResponse> {
+    const search = new URLSearchParams();
+    if (params?.status?.length) search.set("status", params.status.join(","));
+    if (params?.priority?.length) search.set("priority", params.priority.join(","));
+    if (params?.assignee_ids?.length) search.set("assignee_ids", params.assignee_ids.join(","));
+    if (params?.workspace_ids?.length) search.set("workspace_ids", params.workspace_ids.join(","));
+    if (params?.limit) search.set("limit", String(params.limit));
+    if (params?.after) search.set("after", params.after);
+    if (params?.open_only) search.set("open_only", "true");
+    const qs = search.toString();
+    return this.fetch(qs ? `/api/issues/cross-workspace?${qs}` : "/api/issues/cross-workspace");
   }
 
   async searchIssues(params: { q: string; limit?: number; offset?: number; include_closed?: boolean; signal?: AbortSignal }): Promise<SearchIssuesResponse> {
