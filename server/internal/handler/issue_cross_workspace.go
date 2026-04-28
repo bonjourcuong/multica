@@ -12,7 +12,6 @@ import (
 
 	"github.com/jackc/pgx/v5/pgtype"
 
-	"github.com/multica-ai/multica/server/internal/metrics"
 	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
@@ -332,7 +331,6 @@ func (h *Handler) ListCrossWorkspaceIssues(w http.ResponseWriter, r *http.Reques
 	wsCount := len(idsByWS)
 
 	durationMs := time.Since(start).Milliseconds()
-	metrics.CrossWorkspaceIssuesDuration.Observe(float64(durationMs))
 
 	slog.Info("list cross-workspace issues",
 		"endpoint", "/api/issues/cross-workspace",
