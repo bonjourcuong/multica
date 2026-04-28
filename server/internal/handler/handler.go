@@ -15,6 +15,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/documents"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/middleware"
 	"github.com/multica-ai/multica/server/internal/realtime"
@@ -64,6 +65,7 @@ type Handler struct {
 	Storage               storage.Storage
 	CFSigner              *auth.CloudFrontSigner
 	Analytics             analytics.Client
+	Documents             *documents.Resolver
 	cfg                   Config
 }
 
