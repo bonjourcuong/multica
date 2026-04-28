@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
+	"github.com/multica-ai/multica/server/internal/documents"
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/handler"
 	"github.com/multica-ai/multica/server/internal/middleware"
@@ -88,6 +90,19 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 	if rdb != nil {
 		h.LocalSkillListStore = handler.NewRedisLocalSkillListStore(rdb)
 		h.LocalSkillImportStore = handler.NewRedisLocalSkillImportStore(rdb)
+	}
+
+	// Documents tab (PKM browser): MULTICA_PKM_ROOT is the allowlist root all
+	// workspace pkm_path values resolve under. When unset, the documents
+	// endpoints respond 503 — the feature is dormant rather than broken.
+	if root := strings.TrimSpace(os.Getenv("MULTICA_PKM_ROOT")); root != "" {
+		resolver, err := documents.NewResolver(root)
+		if err != nil {
+			slog.Warn("documents: MULTICA_PKM_ROOT misconfigured, feature disabled", "root", root, "error", err)
+		} else {
+			h.Documents = resolver
+			slog.Info("documents: api enabled", "root", resolver.Root())
+		}
 	}
 	health := newServerHealth(pool)
 
@@ -218,6 +233,10 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 					r.Get("/members", h.ListMembersWithUser)
 					r.Post("/leave", h.LeaveWorkspace)
 					r.Get("/invitations", h.ListWorkspaceInvitations)
+					// Documents tab (PKM browser, read-only — MUL-16).
+					r.Get("/documents/tree", h.GetDocumentsTree)
+					r.Get("/documents/file", h.GetDocumentsFile)
+					r.Get("/documents/image", h.GetDocumentsImage)
 				})
 				// Admin-level access
 				r.Group(func(r chi.Router) {
