@@ -285,8 +285,8 @@ func TestListDirHidesDotfilesAndDangling(t *testing.T) {
 	if _, ok := names["escape-link"]; ok {
 		t.Errorf("escaping symlink leaked into listing")
 	}
-	if _, ok := names["notes"]; !ok || names["notes"].Type != "dir" {
-		t.Errorf("expected notes dir entry, got %+v", names["notes"])
+	if _, ok := names["notes"]; !ok || names["notes"].Type != "folder" {
+		t.Errorf("expected notes folder entry, got %+v", names["notes"])
 	}
 	if _, ok := names["secret.md"]; !ok || names["secret.md"].Type != "file" {
 		t.Errorf("expected secret.md file entry, got %+v", names["secret.md"])
