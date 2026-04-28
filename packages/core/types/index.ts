@@ -45,6 +45,7 @@ export type {
   DocumentEntry,
   DocumentTree,
   DocumentFile,
+  DocumentWriteResult,
 } from "./document";
 export { PKM_NOT_CONFIGURED_CODE } from "./document";
 export type { ChatSession, ChatMessage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse } from "./chat";
