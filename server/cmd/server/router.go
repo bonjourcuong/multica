@@ -128,6 +128,12 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 	// dev keeps working without exposing the metrics on a public listener.
 	r.Get("/health/realtime", realtimeMetricsHandler(os.Getenv("REALTIME_METRICS_TOKEN")))
 
+	// Prometheus metrics endpoint. Like /health/realtime this is restricted:
+	// when METRICS_TOKEN is set callers must present it via Authorization
+	// Bearer; when unset, only loopback callers can scrape (so local dev
+	// keeps working without exposing metrics on a public listener).
+	r.Get("/metrics", promMetricsHandler(os.Getenv("METRICS_TOKEN")))
+
 	// WebSocket
 	mc := &membershipChecker{queries: queries}
 	pr := &patResolver{queries: queries}
@@ -235,6 +241,11 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				r.With(middleware.RequireWorkspaceRoleFromURL(queries, "id", "owner")).Delete("/", h.DeleteWorkspace)
 			})
 		})
+
+		// Cross-workspace issue list. Membership is enforced inside the SQL
+		// JOIN, so the route stays in the user-scoped group with no
+		// workspace ID in the URL. See ADR 0001.
+		r.Get("/api/issues/cross-workspace", h.ListCrossWorkspaceIssues)
 
 		// User-scoped invitation routes (no workspace context required)
 		r.Get("/api/invitations", h.ListMyInvitations)
