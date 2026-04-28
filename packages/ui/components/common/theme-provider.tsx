@@ -4,28 +4,24 @@ import { ThemeProvider as NextThemesProvider, useTheme } from "next-themes";
 export { useTheme };
 import { TooltipProvider } from "../ui/tooltip";
 
-function ThemeClassSync() {
-  const { resolvedTheme } = useTheme();
-
+// Force-light: visually always light, no matter what next-themes resolves to
+// or what external scripts (e.g. Fabric clipper) inject onto <html>.
+function ForceLightTheme() {
   useEffect(() => {
-    if (resolvedTheme !== "light" && resolvedTheme !== "dark") return;
-
     const html = document.documentElement;
-    const stale = resolvedTheme === "dark" ? "light" : "dark";
     const observer = new MutationObserver(apply);
 
-    // Disconnect during our own writes so classList ops do not retrigger us.
     function apply() {
       observer.disconnect();
-      html.classList.remove(stale);
-      html.classList.add(resolvedTheme);
-      html.style.colorScheme = resolvedTheme;
+      html.classList.remove("dark");
+      html.classList.add("light");
+      html.style.colorScheme = "light";
       observer.observe(html, { attributes: true, attributeFilter: ["class"] });
     }
 
     apply();
     return () => observer.disconnect();
-  }, [resolvedTheme]);
+  }, []);
 
   return null;
 }
@@ -42,7 +38,7 @@ export function ThemeProvider({
       disableTransitionOnChange
       {...props}
     >
-      <ThemeClassSync />
+      <ForceLightTheme />
       <TooltipProvider delay={500}>
         {children}
       </TooltipProvider>
