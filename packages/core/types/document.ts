@@ -41,6 +41,17 @@ export interface DocumentFile {
 }
 
 /**
+ * Response shape for write/create endpoints (MUL-18). The server echoes the
+ * relative path it actually wrote (post-clean) and the byte count it stored —
+ * the byte count is what the client should trust over `body.length` because
+ * the server enforces the same canonicalization the read API will use.
+ */
+export interface DocumentWriteResult {
+  path: string;
+  bytes: number;
+}
+
+/**
  * Server returns a structured "no pkm_path configured" error so the UI can
  * render an inviting empty state with a link to settings instead of a generic
  * error toast. Mapped from the `code` field of an ApiError 400/409 response.

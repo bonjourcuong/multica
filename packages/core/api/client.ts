@@ -73,6 +73,7 @@ import type {
   ListAutopilotRunsResponse,
   DocumentTree,
   DocumentFile,
+  DocumentWriteResult,
 } from "../types";
 import type { OnboardingCompletionPath } from "../onboarding/types";
 import { type Logger, noopLogger } from "../logger";
@@ -1142,5 +1143,87 @@ export class ApiClient {
     const search = new URLSearchParams();
     search.set("path", path);
     return `${this.baseUrl}/api/workspaces/${workspaceId}/documents/image?${search}`;
+  }
+
+  // Documents — write/create/delete (MUL-18). Body is raw markdown bytes,
+  // not JSON. Each call overrides Content-Type so the default JSON header
+  // from `fetch<T>()` doesn't ride along.
+  async writeDocumentFile(
+    workspaceId: string,
+    path: string,
+    content: string,
+  ): Promise<DocumentWriteResult> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/documents/file?${search}`,
+      {
+        method: "PUT",
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        body: content,
+      },
+    );
+  }
+
+  async createDocumentFile(
+    workspaceId: string,
+    path: string,
+    content = "",
+  ): Promise<DocumentWriteResult> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/documents/file?${search}`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "text/markdown; charset=utf-8" },
+        body: content,
+      },
+    );
+  }
+
+  async deleteDocumentFile(workspaceId: string, path: string): Promise<void> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    await this.fetch(`/api/workspaces/${workspaceId}/documents/file?${search}`, {
+      method: "DELETE",
+    });
+  }
+
+  async createDocumentFolder(
+    workspaceId: string,
+    path: string,
+  ): Promise<{ path: string }> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(
+      `/api/workspaces/${workspaceId}/documents/folder?${search}`,
+      { method: "POST" },
+    );
+  }
+
+  /**
+   * Recursive folder delete is gated by an `X-Confirm-Force-Delete: yes`
+   * header — the server returns 428 Precondition Required if the header is
+   * missing on a `force=true` request. We always send the header alongside
+   * `force` so a single user-confirmed delete completes in one round-trip.
+   */
+  async deleteDocumentFolder(
+    workspaceId: string,
+    path: string,
+    opts?: { force?: boolean },
+  ): Promise<void> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    if (opts?.force) search.set("force", "true");
+    await this.fetch(
+      `/api/workspaces/${workspaceId}/documents/folder?${search}`,
+      {
+        method: "DELETE",
+        ...(opts?.force
+          ? { headers: { "X-Confirm-Force-Delete": "yes" } }
+          : {}),
+      },
+    );
   }
 }
