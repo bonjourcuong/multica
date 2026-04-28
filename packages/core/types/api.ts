@@ -1,4 +1,10 @@
-import type { Issue, IssueStatus, IssuePriority, IssueAssigneeType } from "./issue";
+import type {
+  Issue,
+  IssueStatus,
+  IssuePriority,
+  IssueAssigneeType,
+  CrossWorkspaceIssue,
+} from "./issue";
 import type { MemberRole } from "./workspace";
 import type { Project } from "./project";
 
@@ -46,6 +52,34 @@ export interface ListIssuesParams {
 export interface ListIssuesResponse {
   issues: Issue[];
   total: number;
+}
+
+export interface ListCrossWorkspaceIssuesParams {
+  /** Comma-joined on the wire. */
+  status?: IssueStatus[];
+  /** Comma-joined on the wire. */
+  priority?: IssuePriority[];
+  /** Comma-joined on the wire. */
+  assignee_ids?: string[];
+  /** Comma-joined on the wire. */
+  workspace_ids?: string[];
+  limit?: number;
+  /** Opaque server cursor. */
+  after?: string;
+  /** Shortcut: ignores `status` and returns everything except done/cancelled. */
+  open_only?: boolean;
+}
+
+/**
+ * Raw backend response shape for `GET /api/issues/cross-workspace`
+ * (see ADR 0001 §1.3). `total_returned` is the count in `issues` — there is
+ * intentionally no global `COUNT(*)`.
+ */
+export interface ListCrossWorkspaceIssuesResponse {
+  issues: CrossWorkspaceIssue[];
+  next_cursor: string | null;
+  has_more: boolean;
+  total_returned: number;
 }
 
 /** Per-status bucket in the paginated issue cache. `total` is the server count (all pages), not the length of `issues`. */

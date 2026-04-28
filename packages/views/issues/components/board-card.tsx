@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, memo } from "react";
+import { useCallback, memo, type ReactNode } from "react";
 import { AppLink } from "../../navigation";
 import { useSortable, defaultAnimateLayoutChanges } from "@dnd-kit/sortable";
 import type { AnimateLayoutChanges } from "@dnd-kit/sortable";
@@ -48,10 +48,18 @@ export const BoardCardContent = memo(function BoardCardContent({
   issue,
   editable = false,
   childProgress,
+  workspaceBadge,
 }: {
   issue: Issue;
   editable?: boolean;
   childProgress?: ChildProgress;
+  /**
+   * Optional badge rendered inline before the issue identifier. Used by the
+   * cross-workspace Kanban (ADR 0001) to mark which workspace owns the
+   * card. Default-undefined keeps existing per-workspace call sites
+   * untouched.
+   */
+  workspaceBadge?: ReactNode;
 }) {
   const storeProperties = useViewStore((s) => s.cardProperties);
   const priorityCfg = PRIORITY_CONFIG[issue.priority];
@@ -84,8 +92,11 @@ export const BoardCardContent = memo(function BoardCardContent({
 
   return (
     <div className="rounded-lg border-[0.5px] border-border bg-card py-3 px-2.5 shadow-[0_3px_6px_-2px_rgba(0,0,0,0.02),0_1px_1px_0_rgba(0,0,0,0.04)] transition-colors group-hover/card:border-accent group-hover/card:bg-accent group-data-[popup-open]/card:border-accent group-data-[popup-open]/card:bg-accent">
-      {/* Row 1: Identifier */}
-      <p className="text-xs text-muted-foreground">{issue.identifier}</p>
+      {/* Row 1: Workspace badge (cross-workspace only) + identifier */}
+      <div className="flex items-center gap-1.5">
+        {workspaceBadge}
+        <p className="text-xs text-muted-foreground">{issue.identifier}</p>
+      </div>
 
       {/* Row 2: Title */}
       <p className="mt-1 text-sm font-medium leading-snug line-clamp-2">

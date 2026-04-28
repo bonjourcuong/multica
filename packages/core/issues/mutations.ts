@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
 import {
   issueKeys,
+  crossWorkspaceIssueKeys,
   ISSUE_PAGE_SIZE,
   type MyIssuesFilter,
 } from "./queries";
@@ -118,6 +119,7 @@ export function useCreateIssue() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
     },
   });
 }
@@ -177,6 +179,7 @@ export function useUpdateIssue() {
     onSettled: (_data, _err, vars, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.detail(wsId, vars.id) });
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
       // Invalidate old parent's children cache
       if (ctx?.parentId) {
         qc.invalidateQueries({
@@ -216,6 +219,7 @@ export function useDeleteIssue() {
     },
     onSettled: (_data, _err, _id, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
       if (ctx?.parentIssueId) {
         qc.invalidateQueries({ queryKey: issueKeys.children(wsId, ctx.parentIssueId) });
         qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
@@ -251,6 +255,7 @@ export function useBatchUpdateIssues() {
     },
     onSettled: () => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
     },
   });
 }
@@ -283,6 +288,7 @@ export function useBatchDeleteIssues() {
     },
     onSettled: (_data, _err, _ids, ctx) => {
       qc.invalidateQueries({ queryKey: issueKeys.list(wsId) });
+      qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
       if (ctx?.parentIssueIds && ctx.parentIssueIds.size > 0) {
         for (const parentId of ctx.parentIssueIds) {
           qc.invalidateQueries({ queryKey: issueKeys.children(wsId, parentId) });

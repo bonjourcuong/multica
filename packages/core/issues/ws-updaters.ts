@@ -1,5 +1,5 @@
 import type { QueryClient } from "@tanstack/react-query";
-import { issueKeys } from "./queries";
+import { issueKeys, crossWorkspaceIssueKeys } from "./queries";
 import {
   addIssueToBuckets,
   findIssueLocation,
@@ -18,6 +18,7 @@ export function onIssueCreated(
     old ? addIssueToBuckets(old, issue) : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
   if (issue.parent_issue_id) {
     qc.invalidateQueries({ queryKey: issueKeys.children(wsId, issue.parent_issue_id) });
     qc.invalidateQueries({ queryKey: issueKeys.childProgress(wsId) });
@@ -47,6 +48,7 @@ export function onIssueUpdated(
     old ? patchIssueInBuckets(old, issue.id, issue) : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
   qc.setQueryData<Issue>(issueKeys.detail(wsId, issue.id), (old) =>
     old ? { ...old, ...issue } : old,
   );
@@ -105,6 +107,7 @@ export function onIssueDeleted(
     old ? removeIssueFromBuckets(old, issueId) : old,
   );
   qc.invalidateQueries({ queryKey: issueKeys.myAll(wsId) });
+  qc.invalidateQueries({ queryKey: crossWorkspaceIssueKeys.all() });
   qc.removeQueries({ queryKey: issueKeys.detail(wsId, issueId) });
   qc.removeQueries({ queryKey: issueKeys.timeline(issueId) });
   qc.removeQueries({ queryKey: issueKeys.reactions(issueId) });
