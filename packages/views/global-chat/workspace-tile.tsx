@@ -1,11 +1,13 @@
 "use client";
 
 import { workspaceColor } from "@multica/core/workspace/color";
+import { cn } from "@multica/ui/lib/utils";
+import { useWorkspaceMirror } from "./use-workspace-mirror";
 
 /**
  * Minimal shape this tile needs to render. Wider than the workspace list
  * because it also carries the mirror-session pointer used to subscribe to
- * realtime updates (wired in the next commit).
+ * realtime updates (see `use-workspace-mirror`).
  */
 export interface WorkspaceTileSpec {
   workspace_id: string;
@@ -22,11 +24,12 @@ export interface WorkspaceTileProps {
 
 /**
  * Single workspace's mirror session, rendered as a card in the tile grid.
- * The realtime subscription is added in the follow-up commit; for now the
- * tile renders only the header so the grid layout (rows, cap, scroll) can
- * be exercised without a live websocket.
+ * Subscribes to live updates while mounted; the parent grid is responsible
+ * for not mounting more tiles than the realtime hub can comfortably fan
+ * out to (see ADR D7 — the cap lives in the grid, not here).
  */
 export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
+  const { messages } = useWorkspaceMirror(workspace.mirror_session_id);
   const initials = workspace.workspace_name.slice(0, 2).toUpperCase();
   const swatch = workspaceColor(workspace.workspace_id);
 
@@ -53,6 +56,30 @@ export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
           </div>
         </div>
       </header>
+      <ol className="flex-1 space-y-1 overflow-y-auto p-2 text-xs">
+        {messages.length === 0 ? (
+          <li
+            className="text-muted-foreground"
+            data-testid="tile-empty"
+          >
+            No activity yet
+          </li>
+        ) : (
+          messages.map((m) => (
+            <li
+              key={m.id}
+              className={cn(
+                "rounded-sm px-2 py-1",
+                m.author_kind === "user"
+                  ? "bg-muted text-foreground"
+                  : "text-foreground/85",
+              )}
+            >
+              {m.body}
+            </li>
+          ))
+        )}
+      </ol>
     </article>
   );
 }

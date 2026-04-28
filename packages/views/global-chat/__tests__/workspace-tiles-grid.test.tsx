@@ -1,7 +1,15 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { render, fireEvent } from "@testing-library/react";
 import { WorkspaceTilesGrid } from "../workspace-tiles-grid";
 import type { WorkspaceTileSpec } from "../workspace-tile";
+
+// Tiles open a realtime subscription via use-workspace-mirror. The grid is
+// the unit under test here, so stub the hook out — the mirror behaviour is
+// covered by its own tests, and we don't want to require a WSProvider just
+// to assert grid layout.
+vi.mock("../use-workspace-mirror", () => ({
+  useWorkspaceMirror: () => ({ messages: [] }),
+}));
 
 function makeSpecs(n: number): WorkspaceTileSpec[] {
   return Array.from({ length: n }).map((_, i) => ({
