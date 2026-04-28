@@ -5,9 +5,31 @@ import { useQuery } from "@tanstack/react-query";
 import { documentTreeOptions } from "@multica/core/documents";
 import type { DocumentEntry, DocumentTree } from "@multica/core/types";
 import { ApiError } from "@multica/core/api";
-import { ChevronRight, Folder, FolderOpen, FileText, AlertTriangle } from "lucide-react";
+import {
+  ChevronRight,
+  Folder,
+  FolderOpen,
+  FileText,
+  AlertTriangle,
+  FilePlus,
+  FolderPlus,
+  Trash2,
+} from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { Skeleton } from "@multica/ui/components/ui/skeleton";
+import {
+  ContextMenu,
+  ContextMenuTrigger,
+  ContextMenuContent,
+  ContextMenuItem,
+  ContextMenuSeparator,
+} from "@multica/ui/components/ui/context-menu";
+
+export interface TreeActionHandlers {
+  newFile: (parentPath: string) => void;
+  newFolder: (parentPath: string) => void;
+  del: (path: string, type: "file" | "folder") => void;
+}
 
 interface DocumentTreeProps {
   workspaceId: string;
@@ -17,6 +39,13 @@ interface DocumentTreeProps {
   onSelectFile: (path: string) => void;
   /** Fired when a load error occurs at the root — lets the page show empty state for "pkm not configured". */
   onRootError?: (error: ApiError | Error) => void;
+  /**
+   * Right-click action handlers — called when the user picks a tree action
+   * via the context menu. The page owns the dialog state for these (file/
+   * folder creation, delete confirm) so the same dialogs back the toolbar
+   * `+` button and the per-node menus.
+   */
+  onAction: TreeActionHandlers;
 }
 
 /**
@@ -25,15 +54,22 @@ interface DocumentTreeProps {
  * it. TanStack Query caches each path independently so re-expanding is
  * instant after the first fetch.
  *
+ * Tree-action surface (MUL-19):
+ * - The page exposes a `+` dropdown in the header that creates files /
+ *   folders at the root.
+ * - Right-click on any folder opens "New file here", "New folder here",
+ *   "Delete folder".
+ * - Right-click on any `.md` file opens "Delete file".
+ *
  * The component itself only owns "which folders are expanded" UI state. All
- * other state (selection, errors) is lifted to the parent so the viewer can
- * react to selection changes without round-tripping through the tree.
+ * other state (selection, errors, dialog state) is lifted to the parent.
  */
 export function DocumentTree({
   workspaceId,
   selectedPath,
   onSelectFile,
   onRootError,
+  onAction,
 }: DocumentTreeProps) {
   const [expanded, setExpanded] = React.useState<Set<string>>(() => new Set([""]));
 
@@ -57,6 +93,7 @@ export function DocumentTree({
         selectedPath={selectedPath}
         onSelectFile={onSelectFile}
         onRootError={onRootError}
+        onAction={onAction}
       />
     </div>
   );
@@ -71,6 +108,7 @@ interface FolderNodeProps {
   selectedPath: string;
   onSelectFile: (path: string) => void;
   onRootError?: (error: ApiError | Error) => void;
+  onAction: TreeActionHandlers;
 }
 
 function FolderNode({
@@ -82,6 +120,7 @@ function FolderNode({
   selectedPath,
   onSelectFile,
   onRootError,
+  onAction,
 }: FolderNodeProps) {
   const isOpen = expanded.has(path);
   const isRoot = depth === 0;
@@ -112,6 +151,7 @@ function FolderNode({
         onSelectFile={onSelectFile}
         onRootError={onRootError}
         query={query}
+        onAction={onAction}
       />
     );
   }
@@ -121,23 +161,47 @@ function FolderNode({
 
   return (
     <div role="treeitem" aria-expanded={isOpen}>
-      <button
-        type="button"
-        className={cn(
-          "group flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-sidebar-accent/70",
-        )}
-        style={{ paddingLeft: `${depth * 12 + 6}px` }}
-        onClick={() => onToggle(path)}
-      >
-        <ChevronRight
-          className={cn(
-            "size-3 shrink-0 text-muted-foreground transition-transform",
-            isOpen && "rotate-90",
-          )}
+      <ContextMenu>
+        <ContextMenuTrigger
+          render={
+            <button
+              type="button"
+              className={cn(
+                "group flex w-full items-center gap-1 rounded-md px-1.5 py-1 text-left transition-colors hover:bg-sidebar-accent/70",
+              )}
+              style={{ paddingLeft: `${depth * 12 + 6}px` }}
+              onClick={() => onToggle(path)}
+            >
+              <ChevronRight
+                className={cn(
+                  "size-3 shrink-0 text-muted-foreground transition-transform",
+                  isOpen && "rotate-90",
+                )}
+              />
+              <Icon className="size-3.5 shrink-0 text-muted-foreground" />
+              <span className="min-w-0 flex-1 truncate">{name}</span>
+            </button>
+          }
         />
-        <Icon className="size-3.5 shrink-0 text-muted-foreground" />
-        <span className="min-w-0 flex-1 truncate">{name}</span>
-      </button>
+        <ContextMenuContent>
+          <ContextMenuItem onClick={() => onAction.newFile(path)}>
+            <FilePlus className="size-4" />
+            New file here
+          </ContextMenuItem>
+          <ContextMenuItem onClick={() => onAction.newFolder(path)}>
+            <FolderPlus className="size-4" />
+            New folder here
+          </ContextMenuItem>
+          <ContextMenuSeparator />
+          <ContextMenuItem
+            variant="destructive"
+            onClick={() => onAction.del(path, "folder")}
+          >
+            <Trash2 className="size-4" />
+            Delete folder
+          </ContextMenuItem>
+        </ContextMenuContent>
+      </ContextMenu>
       {isOpen && (
         <FolderChildren
           workspaceId={workspaceId}
@@ -147,6 +211,7 @@ function FolderNode({
           selectedPath={selectedPath}
           onSelectFile={onSelectFile}
           query={query}
+          onAction={onAction}
         />
       )}
     </div>
@@ -167,6 +232,7 @@ function FolderChildren({
   onSelectFile,
   onRootError,
   query,
+  onAction,
 }: FolderChildrenProps) {
   if (query.isPending) {
     return (
@@ -224,6 +290,7 @@ function FolderChildren({
               onToggle={onToggle}
               selectedPath={selectedPath}
               onSelectFile={onSelectFile}
+              onAction={onAction}
             />
           );
         }
@@ -234,6 +301,7 @@ function FolderChildren({
             depth={depth + 1}
             isSelected={entry.path === selectedPath}
             onSelectFile={onSelectFile}
+            onAction={onAction}
           />
         );
       })}
@@ -246,15 +314,22 @@ interface FileNodeProps {
   depth: number;
   isSelected: boolean;
   onSelectFile: (path: string) => void;
+  onAction: TreeActionHandlers;
 }
 
-function FileNode({ entry, depth, isSelected, onSelectFile }: FileNodeProps) {
+function FileNode({
+  entry,
+  depth,
+  isSelected,
+  onSelectFile,
+  onAction,
+}: FileNodeProps) {
   // Only `.md` files are openable in the read-only viewer. Anything else
   // renders disabled so the user understands it's not browsable yet — image
   // files are referenced by markdown but not stand-alone targets.
   const isMarkdown = entry.name.toLowerCase().endsWith(".md");
 
-  return (
+  const node = (
     <button
       type="button"
       role="treeitem"
@@ -273,6 +348,27 @@ function FileNode({ entry, depth, isSelected, onSelectFile }: FileNodeProps) {
       <FileText className="size-3.5 shrink-0 text-muted-foreground" />
       <span className="min-w-0 flex-1 truncate">{entry.name}</span>
     </button>
+  );
+
+  // Only `.md` files participate in the right-click menu. Non-md files
+  // (images referenced by markdown) are read-only here — deletion would
+  // need a backend endpoint that strips the `.md`-only extension guard,
+  // and that's out of scope for MUL-19.
+  if (!isMarkdown) return node;
+
+  return (
+    <ContextMenu>
+      <ContextMenuTrigger render={node} />
+      <ContextMenuContent>
+        <ContextMenuItem
+          variant="destructive"
+          onClick={() => onAction.del(entry.path, "file")}
+        >
+          <Trash2 className="size-4" />
+          Delete file
+        </ContextMenuItem>
+      </ContextMenuContent>
+    </ContextMenu>
   );
 }
 
