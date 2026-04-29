@@ -75,6 +75,36 @@ func validateSettingsPKMPath(settings any) error {
 	return nil
 }
 
+// validateSettingsPKMContextFiles ensures that, when present, the
+// pkm_context_files field is a JSON array of strings. The strings
+// themselves are checked at read time (resolved against the workspace
+// pkm_path each claim) so the user can list files that don't yet exist
+// without breaking the save.
+func validateSettingsPKMContextFiles(settings any) error {
+	obj, ok := settings.(map[string]any)
+	if !ok {
+		return nil
+	}
+	raw, present := obj["pkm_context_files"]
+	if !present || raw == nil {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return errors.New("pkm_context_files must be an array")
+	}
+	for i, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			return fmt.Errorf("pkm_context_files[%d] must be a string", i)
+		}
+		if strings.Contains(s, "..") {
+			return fmt.Errorf("pkm_context_files[%d] must not contain '..'", i)
+		}
+	}
+	return nil
+}
+
 func workspaceToResponse(w db.Workspace) WorkspaceResponse {
 	var settings any
 	if w.Settings != nil {
@@ -279,6 +309,10 @@ func (h *Handler) UpdateWorkspace(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Settings != nil {
 		if err := validateSettingsPKMPath(req.Settings); err != nil {
+			writeError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if err := validateSettingsPKMContextFiles(req.Settings); err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
 		}

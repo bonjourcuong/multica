@@ -48,6 +48,79 @@ func TestWorkspacePKMPathExtraction(t *testing.T) {
 	}
 }
 
+func TestWorkspacePKMContextFilesExtraction(t *testing.T) {
+	cases := []struct {
+		name string
+		in   []byte
+		want []string
+	}{
+		{"nil settings", nil, nil},
+		{"missing key", []byte(`{"other":"x"}`), nil},
+		{"wrong type", []byte(`{"pkm_context_files":"not an array"}`), nil},
+		{"empty list", []byte(`{"pkm_context_files":[]}`), []string{}},
+		{
+			"happy",
+			[]byte(`{"pkm_context_files":["adrs/foo.md","docs/bar.md"]}`),
+			[]string{"adrs/foo.md", "docs/bar.md"},
+		},
+		{
+			"strip slashes and trim, drop empty entries",
+			[]byte(`{"pkm_context_files":["/adrs/foo.md","  bar.md  ","",  null]}`),
+			[]string{"adrs/foo.md", "bar.md"},
+		},
+		{
+			"non-string entries are skipped, not fatal",
+			[]byte(`{"pkm_context_files":["ok.md", 42, true]}`),
+			[]string{"ok.md"},
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := workspacePKMContextFiles(db.Workspace{Settings: c.in})
+			if len(got) != len(c.want) {
+				t.Fatalf("got %v (len %d), want %v (len %d)", got, len(got), c.want, len(c.want))
+			}
+			for i := range got {
+				if got[i] != c.want[i] {
+					t.Errorf("idx %d: got %q, want %q", i, got[i], c.want[i])
+				}
+			}
+		})
+	}
+}
+
+func TestAppendContextBlock(t *testing.T) {
+	cases := []struct {
+		name         string
+		instructions string
+		extra        string
+		want         string
+	}{
+		{"empty instructions", "", "## Workspace Context\n\nbody", "## Workspace Context\n\nbody"},
+		{"empty extra returns instructions intact", "agent identity", "", "agent identity"},
+		{
+			"both present joined by blank line",
+			"agent identity\n",
+			"## Workspace Context\n\nbody",
+			"agent identity\n\n## Workspace Context\n\nbody",
+		},
+		{
+			"trailing whitespace on instructions is trimmed before joining",
+			"agent identity\n\n   ",
+			"## Workspace Context",
+			"agent identity\n\n## Workspace Context",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := appendContextBlock(c.instructions, c.extra)
+			if got != c.want {
+				t.Errorf("got %q, want %q", got, c.want)
+			}
+		})
+	}
+}
+
 func TestMapDocumentsErrorStatuses(t *testing.T) {
 	cases := []struct {
 		err  error

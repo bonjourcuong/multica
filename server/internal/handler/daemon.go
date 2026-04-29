@@ -896,8 +896,32 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// PKM context auto-injection — append the rendered "## Workspace Context"
+	// block (workspace.context + the configured pkm_context_files content) to
+	// the agent instructions. The daemon writes Instructions verbatim under
+	// the agent identity heading in CLAUDE.md / AGENTS.md, so the agent
+	// always sees this context without having to fetch it manually.
+	if resp.Agent != nil && resp.WorkspaceID != "" {
+		if ws, err := h.Queries.GetWorkspace(r.Context(), parseUUID(resp.WorkspaceID)); err == nil {
+			if extra := h.buildWorkspaceContextBlock(r.Context(), ws); extra != "" {
+				resp.Agent.Instructions = appendContextBlock(resp.Agent.Instructions, extra)
+			}
+		}
+	}
+
 	slog.Info("task claimed by runtime", "task_id", uuidToString(task.ID), "runtime_id", runtimeID, "agent_id", uuidToString(task.AgentID), "prior_session", resp.PriorSessionID)
 	writeJSON(w, http.StatusOK, map[string]any{"task": resp})
+}
+
+// appendContextBlock joins agent instructions with an additional context
+// section. Empty inputs are handled cleanly so the output never starts with
+// stray whitespace.
+func appendContextBlock(instructions, extra string) string {
+	instructions = strings.TrimRight(instructions, " \t\n")
+	if instructions == "" {
+		return extra
+	}
+	return instructions + "\n\n" + extra
 }
 
 // ListPendingTasksByRuntime returns queued/dispatched tasks for a runtime.
