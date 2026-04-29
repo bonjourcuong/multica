@@ -34,6 +34,8 @@ func TestWorkspacePKMPathExtraction(t *testing.T) {
 		{"non-string", []byte(`{"pkm_path": 42}`), ""},
 		{"happy", []byte(`{"pkm_path":"workspace1"}`), "workspace1"},
 		{"trim", []byte(`{"pkm_path":"  workspace1  "}`), "workspace1"},
+		{"strip leading slash", []byte(`{"pkm_path":"/PKM/notes"}`), "PKM/notes"},
+		{"strip leading slash with whitespace", []byte(`{"pkm_path":"  /PKM/notes  "}`), "PKM/notes"},
 		{"invalid json", []byte(`{`), ""},
 	}
 	for _, c := range cases {

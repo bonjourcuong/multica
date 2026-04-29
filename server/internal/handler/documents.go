@@ -38,6 +38,11 @@ const pkmPathSettingKey = "pkm_path"
 
 // workspacePKMPath extracts the configured pkm_path for a workspace from its
 // settings JSON. Returns "" when not configured.
+//
+// The on-disk canonical form starts with "/" (validated by pkmpath.Normalize
+// in the settings handler), but documents.Resolve expects a path RELATIVE
+// to MULTICA_PKM_ROOT — i.e. without a leading "/". We strip it here so the
+// read API matches the write API's behavior in workspacePKMPathFromSettings.
 func workspacePKMPath(ws db.Workspace) string {
 	if len(ws.Settings) == 0 {
 		return ""
@@ -54,7 +59,7 @@ func workspacePKMPath(ws db.Workspace) string {
 	if !ok {
 		return ""
 	}
-	return strings.TrimSpace(s)
+	return strings.TrimPrefix(strings.TrimSpace(s), "/")
 }
 
 // ---------------------------------------------------------------------------
