@@ -1165,4 +1165,73 @@ export class ApiClient {
     search.set("path", path);
     return `${this.baseUrl}/api/workspaces/${workspaceId}/documents/image?${search}`;
   }
+
+  // Documents — write/create/delete (MUL-18). The server reads the request
+  // body raw, so we override Content-Type to text/markdown and pass the
+  // string through unmodified (the JSON-stringify branch in `fetch` would
+  // wrap it in quotes).
+  async putDocumentFile(
+    workspaceId: string,
+    path: string,
+    content: string,
+  ): Promise<{ path: string; bytes: number }> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(`/api/workspaces/${workspaceId}/documents/file?${search}`, {
+      method: "PUT",
+      headers: { "Content-Type": "text/markdown" },
+      body: content,
+    });
+  }
+
+  async createDocumentFile(
+    workspaceId: string,
+    path: string,
+    content: string,
+  ): Promise<{ path: string; bytes: number }> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(`/api/workspaces/${workspaceId}/documents/file?${search}`, {
+      method: "POST",
+      headers: { "Content-Type": "text/markdown" },
+      body: content,
+    });
+  }
+
+  async createDocumentFolder(
+    workspaceId: string,
+    path: string,
+  ): Promise<{ path: string }> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    return this.fetch(`/api/workspaces/${workspaceId}/documents/folder?${search}`, {
+      method: "POST",
+    });
+  }
+
+  async deleteDocumentFile(workspaceId: string, path: string): Promise<void> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    await this.fetch(`/api/workspaces/${workspaceId}/documents/file?${search}`, {
+      method: "DELETE",
+    });
+  }
+
+  // Recursive folder delete requires the X-Confirm-Force-Delete: yes header
+  // when force=true (server-side guard against accidental tree wipes).
+  async deleteDocumentFolder(
+    workspaceId: string,
+    path: string,
+    force = false,
+  ): Promise<void> {
+    const search = new URLSearchParams();
+    search.set("path", path);
+    if (force) search.set("force", "true");
+    const headers: Record<string, string> = {};
+    if (force) headers["X-Confirm-Force-Delete"] = "yes";
+    await this.fetch(`/api/workspaces/${workspaceId}/documents/folder?${search}`, {
+      method: "DELETE",
+      headers,
+    });
+  }
 }

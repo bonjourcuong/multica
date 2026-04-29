@@ -144,4 +144,69 @@ describe("ApiClient", () => {
     expect(headers["X-Client-Version"]).toBeUndefined();
     expect(headers["X-Client-OS"]).toBeUndefined();
   });
+
+  it("uses the expected HTTP contract for documents write endpoints", async () => {
+    const fetchMock = vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+      const status = init?.method === "DELETE" ? 204 : 200;
+      const body = status === 204 ? null : JSON.stringify({ path: "x", bytes: 0 });
+      return Promise.resolve(
+        new Response(body, {
+          status,
+          headers: { "Content-Type": "application/json" },
+        }),
+      );
+    });
+    vi.stubGlobal("fetch", fetchMock);
+
+    const client = new ApiClient("https://api.example.test");
+
+    await client.putDocumentFile("ws-1", "notes/a.md", "hello");
+    await client.createDocumentFile("ws-1", "notes/b.md", "world");
+    await client.createDocumentFolder("ws-1", "notes/sub");
+    await client.deleteDocumentFile("ws-1", "notes/a.md");
+    await client.deleteDocumentFolder("ws-1", "notes/sub", false);
+    await client.deleteDocumentFolder("ws-1", "notes/sub", true);
+
+    const calls = fetchMock.mock.calls.map(([url, init]) => ({
+      url,
+      method: init?.method ?? "GET",
+      body: init?.body,
+      contentType: (init?.headers as Record<string, string>)["Content-Type"],
+      confirmHeader: (init?.headers as Record<string, string>)["X-Confirm-Force-Delete"],
+    }));
+
+    expect(calls).toMatchObject([
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/file?path=notes%2Fa.md",
+        method: "PUT",
+        body: "hello",
+        contentType: "text/markdown",
+      },
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/file?path=notes%2Fb.md",
+        method: "POST",
+        body: "world",
+        contentType: "text/markdown",
+      },
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/folder?path=notes%2Fsub",
+        method: "POST",
+      },
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/file?path=notes%2Fa.md",
+        method: "DELETE",
+      },
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/folder?path=notes%2Fsub",
+        method: "DELETE",
+      },
+      {
+        url: "https://api.example.test/api/workspaces/ws-1/documents/folder?path=notes%2Fsub&force=true",
+        method: "DELETE",
+        confirmHeader: "yes",
+      },
+    ]);
+    // The non-force delete must NOT carry the confirm header.
+    expect(calls[4]?.confirmHeader).toBeUndefined();
+  });
 });
