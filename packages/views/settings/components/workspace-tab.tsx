@@ -46,6 +46,22 @@ function readPkmPath(workspace: Workspace | null | undefined): string {
   return typeof value === "string" ? value : "";
 }
 
+// pkm_context_files is stored as a JSON string array on the backend. The
+// settings UI exposes it as a textarea, one path per line, so users don't
+// have to wrangle commas or quotes.
+function readPkmContextFiles(workspace: Workspace | null | undefined): string {
+  const value = workspace?.settings?.pkm_context_files;
+  if (!Array.isArray(value)) return "";
+  return value.filter((v): v is string => typeof v === "string").join("\n");
+}
+
+function parsePkmContextFiles(textarea: string): string[] {
+  return textarea
+    .split("\n")
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+}
+
 export function WorkspaceTab() {
   const user = useAuthStore((s) => s.user);
   const workspace = useCurrentWorkspace();
@@ -105,6 +121,7 @@ export function WorkspaceTab() {
   const [description, setDescription] = useState(workspace?.description ?? "");
   const [context, setContext] = useState(workspace?.context ?? "");
   const [pkmPath, setPkmPath] = useState(readPkmPath(workspace));
+  const [pkmContextFiles, setPkmContextFiles] = useState(readPkmContextFiles(workspace));
   const [pkmPathError, setPkmPathError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [actionId, setActionId] = useState<string | null>(null);
@@ -132,6 +149,7 @@ export function WorkspaceTab() {
     setDescription(workspace?.description ?? "");
     setContext(workspace?.context ?? "");
     setPkmPath(readPkmPath(workspace));
+    setPkmContextFiles(readPkmContextFiles(workspace));
     setPkmPathError(null);
   }, [workspace]);
 
@@ -144,7 +162,11 @@ export function WorkspaceTab() {
         name,
         description,
         context,
-        settings: { ...workspace.settings, pkm_path: pkmPath.trim() },
+        settings: {
+          ...workspace.settings,
+          pkm_path: pkmPath.trim(),
+          pkm_context_files: parsePkmContextFiles(pkmContextFiles),
+        },
       });
       qc.setQueryData(workspaceKeys.list(), (old: Workspace[] | undefined) =>
         old?.map((ws) => (ws.id === updated.id ? updated : ws)),
@@ -286,6 +308,32 @@ export function WorkspaceTab() {
                   Relative to server PKM root. Default: /PKM-CUONG/GROWTH/PROJECTS
                 </p>
               )}
+            </div>
+            <div>
+              <Label
+                htmlFor="workspace-pkm-context-files"
+                className="text-xs text-muted-foreground"
+              >
+                PKM context files (auto-injected into agent context)
+              </Label>
+              <Textarea
+                id="workspace-pkm-context-files"
+                value={pkmContextFiles}
+                onChange={(e) => setPkmContextFiles(e.target.value)}
+                disabled={!canManageWorkspace}
+                rows={3}
+                placeholder={"adrs/architecture.md\ndocs/system.md"}
+                className="mt-1 resize-none font-mono text-xs"
+                aria-describedby="workspace-pkm-context-files-help"
+              />
+              <p
+                id="workspace-pkm-context-files-help"
+                className="mt-1 text-xs text-muted-foreground"
+              >
+                One PKM-relative path per line. Each file is read at agent
+                dispatch and appended to the agent context, so docs you list
+                here are always available without repeating the content above.
+              </p>
             </div>
             <div>
               <Label className="text-xs text-muted-foreground">Slug</Label>

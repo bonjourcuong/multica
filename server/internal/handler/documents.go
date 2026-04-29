@@ -10,6 +10,7 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -36,6 +37,45 @@ import (
 // localized change to workspacePKMPath().
 const pkmPathSettingKey = "pkm_path"
 
+// pkmContextFilesSettingKey holds the list of PKM-relative paths that are
+// auto-injected into every agent's context (CLAUDE.md / AGENTS.md) at task
+// dispatch. Stored under workspace.settings as a JSON array of strings.
+const pkmContextFilesSettingKey = "pkm_context_files"
+
+// workspacePKMContextFiles returns the list of PKM-relative paths configured
+// for auto-injection into agent context. Returns nil when not configured or
+// when the value is malformed (we silently skip rather than fail-open).
+func workspacePKMContextFiles(ws db.Workspace) []string {
+	if len(ws.Settings) == 0 {
+		return nil
+	}
+	var settings map[string]any
+	if err := json.Unmarshal(ws.Settings, &settings); err != nil {
+		return nil
+	}
+	raw, ok := settings[pkmContextFilesSettingKey]
+	if !ok {
+		return nil
+	}
+	arr, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]string, 0, len(arr))
+	for _, v := range arr {
+		s, ok := v.(string)
+		if !ok {
+			continue
+		}
+		s = strings.TrimSpace(s)
+		s = strings.TrimPrefix(s, "/")
+		if s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
 // workspacePKMPath extracts the configured pkm_path for a workspace from its
 // settings JSON. Returns "" when not configured.
 //
@@ -60,6 +100,69 @@ func workspacePKMPath(ws db.Workspace) string {
 		return ""
 	}
 	return strings.TrimPrefix(strings.TrimSpace(s), "/")
+}
+
+// pkmContextFileMaxBytes caps each PKM context file so a single oversized
+// note can't blow up every claim response. 256 KiB is plenty for an
+// architecture doc and keeps the agent's effective system prompt bounded.
+const pkmContextFileMaxBytes = 256 << 10
+
+// buildWorkspaceContextBlock renders the section appended to agent
+// instructions at task claim. It concatenates:
+//   - workspace.context (free-form text from settings)
+//   - the contents of each file listed in workspace.settings.pkm_context_files
+//
+// Returns "" when nothing is configured. Files that fail to read are
+// silently skipped — they're context, not correctness, so a missing or
+// renamed doc must not break agent dispatch.
+func (h *Handler) buildWorkspaceContextBlock(ctx context.Context, ws db.Workspace) string {
+	freeForm := ""
+	if ws.Context.Valid {
+		freeForm = strings.TrimSpace(ws.Context.String)
+	}
+
+	pkmFiles := workspacePKMContextFiles(ws)
+	pkmPath := workspacePKMPath(ws)
+
+	type loadedFile struct {
+		path    string
+		content string
+	}
+	var loaded []loadedFile
+	if len(pkmFiles) > 0 && pkmPath != "" && h.Documents != nil {
+		for _, rel := range pkmFiles {
+			abs, err := h.Documents.Resolve(pkmPath, rel)
+			if err != nil {
+				slog.Warn("pkm context file: resolve failed", "workspace_id", uuidToString(ws.ID), "path", rel, "error", err)
+				continue
+			}
+			data, _, err := documents.ReadMarkdown(abs, pkmContextFileMaxBytes)
+			if err != nil {
+				slog.Warn("pkm context file: read failed", "workspace_id", uuidToString(ws.ID), "path", rel, "error", err)
+				continue
+			}
+			loaded = append(loaded, loadedFile{path: rel, content: string(data)})
+		}
+	}
+
+	if freeForm == "" && len(loaded) == 0 {
+		return ""
+	}
+
+	var b strings.Builder
+	b.WriteString("## Workspace Context\n\n")
+	if freeForm != "" {
+		b.WriteString(freeForm)
+		b.WriteString("\n\n")
+	}
+	for _, f := range loaded {
+		b.WriteString("### From PKM: `")
+		b.WriteString(f.path)
+		b.WriteString("`\n\n")
+		b.WriteString(strings.TrimSpace(f.content))
+		b.WriteString("\n\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
 }
 
 // ---------------------------------------------------------------------------
