@@ -10,6 +10,7 @@ import { useNavigation, AppLink } from "../../navigation";
 import { PageHeader } from "../../layout/page-header";
 import { DocumentTree } from "./document-tree";
 import { DocumentViewer } from "./document-viewer";
+import { CreateEntryDialog } from "./create-entry-dialog";
 import {
   Empty,
   EmptyContent,
@@ -23,12 +24,25 @@ import {
   ResizablePanel,
   ResizablePanelGroup,
 } from "@multica/ui/components/ui/resizable";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "@multica/ui/components/ui/dropdown-menu";
 import { useIsMobile } from "@multica/ui/hooks/use-mobile";
 import { Button } from "@multica/ui/components/ui/button";
-import { Settings, FolderTree, ArrowLeft } from "lucide-react";
+import {
+  Settings,
+  FolderTree,
+  ArrowLeft,
+  Plus,
+  FilePlus,
+  FolderPlus,
+} from "lucide-react";
 
 /**
- * Documents tab — read-only browser for the workspace's PKM folder.
+ * Documents tab — read/write browser for the workspace's PKM folder.
  *
  * Layout: tree on the left, viewer on the right. Selection lives in the URL
  * (`?path=<rel>`) so deep-linking and back/forward work, and so refreshing
@@ -64,6 +78,21 @@ export function DocumentsPage() {
       setPkmConfigured(false);
     }
   }, []);
+
+  // Single shared dialog for both "new note" and "new folder". The page
+  // owns it (rather than the tree) because the header "+" button needs to
+  // create at root, and per-folder triggers in the tree dispatch through
+  // the same opener via callback prop.
+  const [createDialog, setCreateDialog] = React.useState<{
+    parentPath: string;
+    kind: "file" | "folder";
+  } | null>(null);
+  const openCreate = React.useCallback(
+    (parentPath: string, kind: "file" | "folder") => {
+      setCreateDialog({ parentPath, kind });
+    },
+    [],
+  );
 
   const { defaultLayout, onLayoutChanged } = useDefaultLayout({
     id: "multica_documents_layout",
@@ -101,7 +130,26 @@ export function DocumentsPage() {
   const treePanel = (
     <div className="flex h-full flex-col border-r">
       <PageHeader className="px-3">
-        <h1 className="text-sm font-semibold">Documents</h1>
+        <h1 className="flex-1 text-sm font-semibold">Documents</h1>
+        <DropdownMenu>
+          <DropdownMenuTrigger
+            render={
+              <Button variant="ghost" size="sm" aria-label="Create new entry" />
+            }
+          >
+            <Plus className="size-4" />
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end">
+            <DropdownMenuItem onClick={() => openCreate("", "file")}>
+              <FilePlus className="size-4" />
+              New note
+            </DropdownMenuItem>
+            <DropdownMenuItem onClick={() => openCreate("", "folder")}>
+              <FolderPlus className="size-4" />
+              New folder
+            </DropdownMenuItem>
+          </DropdownMenuContent>
+        </DropdownMenu>
       </PageHeader>
       <div className="flex-1 min-h-0 overflow-y-auto">
         <DocumentTree
@@ -109,12 +157,33 @@ export function DocumentsPage() {
           selectedPath={selectedPath}
           onSelectFile={setSelectedPath}
           onRootError={handleRootError}
+          onCreateRequest={openCreate}
+          onAfterDelete={(path) => {
+            // If the deleted entry is (or contains) the selection, drop it
+            // so the viewer doesn't sit on a 404.
+            if (selectedPath === path || selectedPath.startsWith(path + "/")) {
+              setSelectedPath("");
+            }
+          }}
         />
       </div>
     </div>
   );
 
   const viewerPanel = <DocumentViewer workspaceId={wsId} path={selectedPath} />;
+
+  const dialog = createDialog ? (
+    <CreateEntryDialog
+      workspaceId={wsId}
+      parentPath={createDialog.parentPath}
+      kind={createDialog.kind}
+      open
+      onOpenChange={(open) => !open && setCreateDialog(null)}
+      onCreated={(path) => {
+        if (createDialog.kind === "file") setSelectedPath(path);
+      }}
+    />
+  ) : null;
 
   if (isMobile) {
     if (selectedPath) {
@@ -132,32 +201,41 @@ export function DocumentsPage() {
             </Button>
           </div>
           <div className="flex-1 min-h-0">{viewerPanel}</div>
+          {dialog}
         </div>
       );
     }
-    return <div className="flex flex-1 flex-col min-h-0">{treePanel}</div>;
+    return (
+      <div className="flex flex-1 flex-col min-h-0">
+        {treePanel}
+        {dialog}
+      </div>
+    );
   }
 
   return (
-    <ResizablePanelGroup
-      orientation="horizontal"
-      className="flex-1 min-h-0"
-      defaultLayout={defaultLayout}
-      onLayoutChanged={onLayoutChanged}
-    >
-      <ResizablePanel
-        id="tree"
-        defaultSize={280}
-        minSize={220}
-        maxSize={480}
-        groupResizeBehavior="preserve-pixel-size"
+    <>
+      <ResizablePanelGroup
+        orientation="horizontal"
+        className="flex-1 min-h-0"
+        defaultLayout={defaultLayout}
+        onLayoutChanged={onLayoutChanged}
       >
-        {treePanel}
-      </ResizablePanel>
-      <ResizableHandle />
-      <ResizablePanel id="viewer" minSize="40%">
-        {viewerPanel}
-      </ResizablePanel>
-    </ResizablePanelGroup>
+        <ResizablePanel
+          id="tree"
+          defaultSize={280}
+          minSize={220}
+          maxSize={480}
+          groupResizeBehavior="preserve-pixel-size"
+        >
+          {treePanel}
+        </ResizablePanel>
+        <ResizableHandle />
+        <ResizablePanel id="viewer" minSize="40%">
+          {viewerPanel}
+        </ResizablePanel>
+      </ResizablePanelGroup>
+      {dialog}
+    </>
   );
 }
