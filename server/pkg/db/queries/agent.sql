@@ -296,3 +296,26 @@ SET status = CASE WHEN EXISTS (
     updated_at = now()
 WHERE a.id = $1
 RETURNING *;
+
+-- name: GetGlobalAgentByUser :one
+-- Looks up the user's global "Cuong Pho" digital-twin agent. Agents at
+-- scope='global' have user_id set and workspace_id NULL.
+SELECT * FROM agent
+WHERE scope = 'global' AND user_id = $1
+LIMIT 1;
+
+-- name: CreateGlobalAgent :one
+-- Creates a global-scope agent bound to a user. workspace_id is NULL by
+-- design; the agent_scope_owner CHECK constraint enforces the invariant.
+INSERT INTO agent (
+    workspace_id, name, description, avatar_url, runtime_mode,
+    runtime_config, runtime_id, visibility, max_concurrent_tasks, owner_id,
+    instructions, custom_env, custom_args, mcp_config, model,
+    scope, user_id
+) VALUES (
+    NULL, $1, $2, $3, $4,
+    $5, $6, $7, $8, $9,
+    $10, $11, $12, $13, $14,
+    'global', $15
+)
+RETURNING *;

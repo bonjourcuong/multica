@@ -41,6 +41,8 @@ type Agent struct {
 	CustomArgs         []byte             `json:"custom_args"`
 	McpConfig          []byte             `json:"mcp_config"`
 	Model              pgtype.Text        `json:"model"`
+	Scope              string             `json:"scope"`
+	UserID             pgtype.UUID        `json:"user_id"`
 }
 
 type AgentRuntime struct {
@@ -160,6 +162,7 @@ type ChatMessage struct {
 	Content       string             `json:"content"`
 	TaskID        pgtype.UUID        `json:"task_id"`
 	CreatedAt     pgtype.Timestamptz `json:"created_at"`
+	Metadata      []byte             `json:"metadata"`
 }
 
 type ChatSession struct {
@@ -174,6 +177,7 @@ type ChatSession struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	UnreadSince pgtype.Timestamptz `json:"unread_since"`
+	Scope       string             `json:"scope"`
 }
 
 type Comment struct {
@@ -226,6 +230,26 @@ type Feedback struct {
 	Message     string             `json:"message"`
 	Metadata    []byte             `json:"metadata"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+type GlobalChatMessage struct {
+	ID              pgtype.UUID        `json:"id"`
+	GlobalSessionID pgtype.UUID        `json:"global_session_id"`
+	AuthorKind      string             `json:"author_kind"`
+	AuthorID        pgtype.UUID        `json:"author_id"`
+	Body            string             `json:"body"`
+	Metadata        []byte             `json:"metadata"`
+	DispatchedTo    []byte             `json:"dispatched_to"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+}
+
+type GlobalChatSession struct {
+	ID         pgtype.UUID        `json:"id"`
+	UserID     pgtype.UUID        `json:"user_id"`
+	AgentID    pgtype.UUID        `json:"agent_id"`
+	Title      string             `json:"title"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
 }
 
 type InboxItem struct {

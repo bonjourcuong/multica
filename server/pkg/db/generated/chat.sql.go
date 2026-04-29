@@ -24,7 +24,7 @@ func (q *Queries) ArchiveChatSession(ctx context.Context, id pgtype.UUID) error 
 const createChatMessage = `-- name: CreateChatMessage :one
 INSERT INTO chat_message (chat_session_id, role, content, task_id)
 VALUES ($1, $2, $3, $4)
-RETURNING id, chat_session_id, role, content, task_id, created_at
+RETURNING id, chat_session_id, role, content, task_id, created_at, metadata
 `
 
 type CreateChatMessageParams struct {
@@ -49,6 +49,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 		&i.Content,
 		&i.TaskID,
 		&i.CreatedAt,
+		&i.Metadata,
 	)
 	return i, err
 }
@@ -56,7 +57,7 @@ func (q *Queries) CreateChatMessage(ctx context.Context, arg CreateChatMessagePa
 const createChatSession = `-- name: CreateChatSession :one
 INSERT INTO chat_session (workspace_id, agent_id, creator_id, title)
 VALUES ($1, $2, $3, $4)
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope
 `
 
 type CreateChatSessionParams struct {
@@ -86,6 +87,7 @@ func (q *Queries) CreateChatSession(ctx context.Context, arg CreateChatSessionPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.UnreadSince,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -139,8 +141,45 @@ func (q *Queries) CreateChatTask(ctx context.Context, arg CreateChatTaskParams) 
 	return i, err
 }
 
+const createGlobalMirrorSession = `-- name: CreateGlobalMirrorSession :one
+INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, scope)
+VALUES ($1, $2, $3, 'Cuong Global', 'global_mirror')
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope
+`
+
+type CreateGlobalMirrorSessionParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+	CreatorID   pgtype.UUID `json:"creator_id"`
+}
+
+// Creates the workspace-side "Cuong Global" mirror session. agent_id points
+// at the workspace-resident global mirror agent (pre-existing in the
+// workspace) — for V1 we reuse the user's workspace-default agent, which
+// the dispatch service resolves before calling this. The cosmetic title is
+// "Cuong Global"; lookup is by (workspace_id, scope, creator_id).
+func (q *Queries) CreateGlobalMirrorSession(ctx context.Context, arg CreateGlobalMirrorSessionParams) (ChatSession, error) {
+	row := q.db.QueryRow(ctx, createGlobalMirrorSession, arg.WorkspaceID, arg.AgentID, arg.CreatorID)
+	var i ChatSession
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.AgentID,
+		&i.CreatorID,
+		&i.Title,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.UnreadSince,
+		&i.Scope,
+	)
+	return i, err
+}
+
 const getChatMessage = `-- name: GetChatMessage :one
-SELECT id, chat_session_id, role, content, task_id, created_at FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, metadata FROM chat_message
 WHERE id = $1
 `
 
@@ -154,12 +193,13 @@ func (q *Queries) GetChatMessage(ctx context.Context, id pgtype.UUID) (ChatMessa
 		&i.Content,
 		&i.TaskID,
 		&i.CreatedAt,
+		&i.Metadata,
 	)
 	return i, err
 }
 
 const getChatSession = `-- name: GetChatSession :one
-SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since FROM chat_session
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope FROM chat_session
 WHERE id = $1
 `
 
@@ -178,12 +218,13 @@ func (q *Queries) GetChatSession(ctx context.Context, id pgtype.UUID) (ChatSessi
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.UnreadSince,
+		&i.Scope,
 	)
 	return i, err
 }
 
 const getChatSessionInWorkspace = `-- name: GetChatSessionInWorkspace :one
-SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since FROM chat_session
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope FROM chat_session
 WHERE id = $1 AND workspace_id = $2
 `
 
@@ -207,6 +248,43 @@ func (q *Queries) GetChatSessionInWorkspace(ctx context.Context, arg GetChatSess
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.UnreadSince,
+		&i.Scope,
+	)
+	return i, err
+}
+
+const getGlobalMirrorSession = `-- name: GetGlobalMirrorSession :one
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope FROM chat_session
+WHERE workspace_id = $1
+  AND scope = 'global_mirror'
+  AND creator_id = $2
+LIMIT 1
+`
+
+type GetGlobalMirrorSessionParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	CreatorID   pgtype.UUID `json:"creator_id"`
+}
+
+// Looks up the per-workspace "Cuong Global" mirror session for a given user.
+// Identity is (workspace_id, scope='global_mirror', creator_id), NOT the
+// title — the user-facing name is cosmetic.
+func (q *Queries) GetGlobalMirrorSession(ctx context.Context, arg GetGlobalMirrorSessionParams) (ChatSession, error) {
+	row := q.db.QueryRow(ctx, getGlobalMirrorSession, arg.WorkspaceID, arg.CreatorID)
+	var i ChatSession
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.AgentID,
+		&i.CreatorID,
+		&i.Title,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.UnreadSince,
+		&i.Scope,
 	)
 	return i, err
 }
@@ -258,8 +336,43 @@ func (q *Queries) GetPendingChatTask(ctx context.Context, chatSessionID pgtype.U
 	return i, err
 }
 
+const insertMirrorChatMessage = `-- name: InsertMirrorChatMessage :one
+INSERT INTO chat_message (chat_session_id, role, content, metadata)
+VALUES ($1, $2, $3, $4)
+RETURNING id, chat_session_id, role, content, task_id, created_at, metadata
+`
+
+type InsertMirrorChatMessageParams struct {
+	ChatSessionID pgtype.UUID `json:"chat_session_id"`
+	Role          string      `json:"role"`
+	Content       string      `json:"content"`
+	Metadata      []byte      `json:"metadata"`
+}
+
+// Appends a message to the workspace-side mirror session. metadata carries
+// the {global_origin: {...}} pointer back to the originating global message.
+func (q *Queries) InsertMirrorChatMessage(ctx context.Context, arg InsertMirrorChatMessageParams) (ChatMessage, error) {
+	row := q.db.QueryRow(ctx, insertMirrorChatMessage,
+		arg.ChatSessionID,
+		arg.Role,
+		arg.Content,
+		arg.Metadata,
+	)
+	var i ChatMessage
+	err := row.Scan(
+		&i.ID,
+		&i.ChatSessionID,
+		&i.Role,
+		&i.Content,
+		&i.TaskID,
+		&i.CreatedAt,
+		&i.Metadata,
+	)
+	return i, err
+}
+
 const listAllChatSessionsByCreator = `-- name: ListAllChatSessionsByCreator :many
-SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since,
+SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since, cs.scope,
        (cs.unread_since IS NOT NULL)::bool AS has_unread
 FROM chat_session cs
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2
@@ -283,6 +396,7 @@ type ListAllChatSessionsByCreatorRow struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	UnreadSince pgtype.Timestamptz `json:"unread_since"`
+	Scope       string             `json:"scope"`
 	HasUnread   bool               `json:"has_unread"`
 }
 
@@ -307,6 +421,7 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.UnreadSince,
+			&i.Scope,
 			&i.HasUnread,
 		); err != nil {
 			return nil, err
@@ -320,7 +435,7 @@ func (q *Queries) ListAllChatSessionsByCreator(ctx context.Context, arg ListAllC
 }
 
 const listChatMessages = `-- name: ListChatMessages :many
-SELECT id, chat_session_id, role, content, task_id, created_at FROM chat_message
+SELECT id, chat_session_id, role, content, task_id, created_at, metadata FROM chat_message
 WHERE chat_session_id = $1
 ORDER BY created_at ASC
 `
@@ -341,6 +456,7 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 			&i.Content,
 			&i.TaskID,
 			&i.CreatedAt,
+			&i.Metadata,
 		); err != nil {
 			return nil, err
 		}
@@ -353,7 +469,7 @@ func (q *Queries) ListChatMessages(ctx context.Context, chatSessionID pgtype.UUI
 }
 
 const listChatSessionsByCreator = `-- name: ListChatSessionsByCreator :many
-SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since,
+SELECT cs.id, cs.workspace_id, cs.agent_id, cs.creator_id, cs.title, cs.session_id, cs.work_dir, cs.status, cs.created_at, cs.updated_at, cs.unread_since, cs.scope,
        (cs.unread_since IS NOT NULL)::bool AS has_unread
 FROM chat_session cs
 WHERE cs.workspace_id = $1 AND cs.creator_id = $2 AND cs.status = 'active'
@@ -377,6 +493,7 @@ type ListChatSessionsByCreatorRow struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 	UnreadSince pgtype.Timestamptz `json:"unread_since"`
+	Scope       string             `json:"scope"`
 	HasUnread   bool               `json:"has_unread"`
 }
 
@@ -404,6 +521,7 @@ func (q *Queries) ListChatSessionsByCreator(ctx context.Context, arg ListChatSes
 			&i.CreatedAt,
 			&i.UpdatedAt,
 			&i.UnreadSince,
+			&i.Scope,
 			&i.HasUnread,
 		); err != nil {
 			return nil, err
@@ -521,7 +639,7 @@ func (q *Queries) UpdateChatSessionSession(ctx context.Context, arg UpdateChatSe
 const updateChatSessionTitle = `-- name: UpdateChatSessionTitle :one
 UPDATE chat_session SET title = $2, updated_at = now()
 WHERE id = $1
-RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since
+RETURNING id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope
 `
 
 type UpdateChatSessionTitleParams struct {
@@ -544,6 +662,7 @@ func (q *Queries) UpdateChatSessionTitle(ctx context.Context, arg UpdateChatSess
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.UnreadSince,
+		&i.Scope,
 	)
 	return i, err
 }
