@@ -2,7 +2,11 @@
 
 import { useMutation, useQuery, useQueryClient, queryOptions } from "@tanstack/react-query";
 import { api, type SendGlobalChatMessageResponse } from "@multica/core/api";
-import type { GlobalChatMessage, GlobalChatSession } from "@multica/core/types";
+import type {
+  GlobalChatMessage,
+  GlobalChatSession,
+  GlobalMirrorSummary,
+} from "@multica/core/types";
 
 /**
  * TanStack Query keys for the global-chat slice. Centralised so cache writes
@@ -12,6 +16,7 @@ export const globalChatKeys = {
   all: ["global-chat"] as const,
   session: () => [...globalChatKeys.all, "session", "me"] as const,
   messages: () => [...globalChatKeys.all, "messages", "me"] as const,
+  mirrors: () => [...globalChatKeys.all, "mirrors", "me"] as const,
 };
 
 export function globalChatSessionOptions() {
@@ -30,12 +35,30 @@ export function globalChatMessagesOptions() {
   });
 }
 
+/**
+ * Per-workspace mirror summaries used to populate the tile grid on
+ * `/global/chat`. One entry per workspace the user is a member of, with the
+ * mirror session pointer (nullable until first dispatch), the last activity
+ * timestamp, and an unread count. Backed by `GET /api/global/chat/mirrors`.
+ */
+export function globalMirrorsOptions() {
+  return queryOptions<GlobalMirrorSummary[]>({
+    queryKey: globalChatKeys.mirrors(),
+    queryFn: () => api.listGlobalMirrors(),
+    staleTime: 30_000,
+  });
+}
+
 export function useGlobalChatSession() {
   return useQuery(globalChatSessionOptions());
 }
 
 export function useGlobalChatMessages() {
   return useQuery(globalChatMessagesOptions());
+}
+
+export function useGlobalMirrors() {
+  return useQuery(globalMirrorsOptions());
 }
 
 /**

@@ -27,6 +27,7 @@ import {
   countMirrorSessions,
   ensureStrangerWorkspace,
   getUserIdByEmail,
+  listGlobalMirrors,
 } from "./global-chat-helpers";
 import type { TestApiClient } from "./fixtures";
 
@@ -144,6 +145,17 @@ test.describe("Global chat — cross-workspace permissions", () => {
       marker,
     );
     expect(messagesWithMarker).toBe(0);
+
+    // /api/global/chat/mirrors must not surface the stranger workspace at
+    // all for the default user — same membership filter as the dispatch
+    // path, applied to the read endpoint that drives the tile grid.
+    const token = api.getToken();
+    if (!token) throw new Error("expected an auth token after login");
+    const mirrors = await listGlobalMirrors(token);
+    expect(
+      mirrors.some((m) => m.workspace_id === strangerWorkspaceId),
+      "stranger workspace must not appear in /api/global/chat/mirrors for non-member",
+    ).toBe(false);
 
     // Stranger user accessor sanity — ensures the test isn't silently
     // reading the wrong account if email seeding regresses in the future.

@@ -40,6 +40,11 @@ export interface GlobalChatMessage {
  * Lightweight descriptor returned alongside the workspace list for the global
  * chat tile grid. The mirror session is created lazily on first dispatch, so
  * it can be `null` for workspaces the user has never dispatched to.
+ *
+ * `unread_count` is the number of assistant-authored mirror messages the
+ * user has not yet acknowledged in this workspace; 0 when the session is
+ * read or has never received an assistant reply. Used by the tile to render
+ * an unread badge.
  */
 export interface GlobalMirrorSummary {
   workspace_id: string;
@@ -47,4 +52,5 @@ export interface GlobalMirrorSummary {
   workspace_name: string;
   mirror_session_id: string | null;
   last_message_at: string | null;
+  unread_count: number;
 }

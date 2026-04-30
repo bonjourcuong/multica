@@ -50,6 +50,29 @@ type GlobalChatPostResponse struct {
 	Mentions []GlobalChatMentionEcho                `json:"mentions"`
 }
 
+// GlobalMirrorSummaryResponse is one row of GET /api/global/chat/mirrors.
+// Mirrors `GlobalMirrorSummary` in packages/core/types/global-chat.ts: the
+// frontend client is coded against this exact shape, plus an `unread_count`
+// extension (issue MUL-100 DoD) the tile UI can adopt incrementally.
+//
+// `mirror_session_id` and `last_message_at` are nullable: a workspace the
+// user belongs to but has never dispatched into has no mirror session yet.
+type GlobalMirrorSummaryResponse struct {
+	WorkspaceID     string  `json:"workspace_id"`
+	WorkspaceSlug   string  `json:"workspace_slug"`
+	WorkspaceName   string  `json:"workspace_name"`
+	MirrorSessionID *string `json:"mirror_session_id"`
+	LastMessageAt   *string `json:"last_message_at"`
+	UnreadCount     int32   `json:"unread_count"`
+}
+
+// globalMirrorsLimit caps the per-call mirror summary count. A user belongs
+// to a bounded number of workspaces in practice; the cap exists so a freak
+// case (bot user with thousands of memberships) cannot fan the query out
+// without bound. ADR'd at 200 — bigger means open a separate paginated
+// endpoint, this one is "all my workspaces in one shot".
+const globalMirrorsLimit = 200
+
 type GlobalChatMentionEcho struct {
 	WorkspaceSlug string `json:"workspace_slug"`
 	AgentName     string `json:"agent_name,omitempty"`
@@ -252,6 +275,46 @@ func (h *Handler) QueryCrossWorkspaceIssues(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"issues": rows})
+}
+
+// ListGlobalMirrors is GET /api/global/chat/mirrors. Returns one row per
+// workspace the caller is a member of, sorted by recent mirror activity
+// (workspaces with no mirror yet sink to the tail). Backs the global-chat
+// tile grid: the frontend uses `mirror_session_id` to subscribe to the
+// per-workspace realtime channel and `last_message_at` / `unread_count`
+// to render activity hints.
+//
+// Authorization: membership filter is enforced inside the SQL JOIN — same
+// pattern as ListCrossWorkspaceIssues. A caller with zero memberships
+// receives an empty list (status 200), never a 403.
+func (h *Handler) ListGlobalMirrors(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	rows, err := h.Queries.ListGlobalMirrorsByUser(r.Context(), db.ListGlobalMirrorsByUserParams{
+		UserID: parseUUID(userID),
+		Limit:  globalMirrorsLimit,
+	})
+	if err != nil {
+		slog.Error("list global mirrors failed", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list global mirrors")
+		return
+	}
+
+	resp := make([]GlobalMirrorSummaryResponse, len(rows))
+	for i, row := range rows {
+		resp[i] = GlobalMirrorSummaryResponse{
+			WorkspaceID:     uuidToString(row.WorkspaceID),
+			WorkspaceSlug:   row.WorkspaceSlug,
+			WorkspaceName:   row.WorkspaceName,
+			MirrorSessionID: uuidToPtr(row.MirrorSessionID),
+			LastMessageAt:   timestampToPtr(row.LastMessageAt),
+			UnreadCount:     row.UnreadCount,
+		}
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // ---------------------------------------------------------------------------

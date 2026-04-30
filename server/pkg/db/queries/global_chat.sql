@@ -33,3 +33,46 @@ RETURNING *;
 UPDATE global_chat_message
 SET dispatched_to = dispatched_to || sqlc.arg('entry')::jsonb
 WHERE id = sqlc.arg('id');
+
+-- name: ListGlobalMirrorsByUser :many
+-- One row per workspace the user belongs to. Mirror session columns are NULL
+-- for workspaces the user has never dispatched to (the mirror session is
+-- created lazily on first @workspace mention). Membership is enforced inside
+-- the JOIN so the endpoint can sit outside the per-workspace middleware (ADR
+-- R5): a user passing through the route only ever sees mirrors for
+-- (m.user_id = $1) workspaces.
+--
+-- unread_count counts assistant-authored mirror messages whose created_at is
+-- at or after chat_session.unread_since — which is the timestamp of the
+-- first uncleared assistant reply (see migration 040). 0 when the session
+-- has no unread, NULL-safe via the LEFT JOIN.
+--
+-- Ordered by recent activity so the tile grid lands with the most active
+-- workspaces on the left. NULLS LAST keeps cold workspaces at the tail.
+SELECT
+    w.id            AS workspace_id,
+    w.slug          AS workspace_slug,
+    w.name          AS workspace_name,
+    cs.id           AS mirror_session_id,
+    stats.last_message_at::timestamptz AS last_message_at,
+    COALESCE(stats.unread_count, 0)::int AS unread_count
+FROM member m
+JOIN workspace w ON w.id = m.workspace_id
+LEFT JOIN chat_session cs
+    ON cs.workspace_id = w.id
+   AND cs.scope        = 'global_mirror'
+   AND cs.creator_id   = m.user_id
+LEFT JOIN LATERAL (
+    SELECT
+        MAX(cm.created_at) AS last_message_at,
+        COUNT(*) FILTER (
+            WHERE cs.unread_since IS NOT NULL
+              AND cm.role        = 'assistant'
+              AND cm.created_at >= cs.unread_since
+        ) AS unread_count
+    FROM chat_message cm
+    WHERE cm.chat_session_id = cs.id
+) stats ON TRUE
+WHERE m.user_id = $1
+ORDER BY stats.last_message_at DESC NULLS LAST, w.name ASC
+LIMIT $2;

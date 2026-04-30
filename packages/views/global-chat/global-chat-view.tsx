@@ -1,10 +1,9 @@
 "use client";
 
 import { useMemo } from "react";
-import { useQuery } from "@tanstack/react-query";
-import { workspaceListOptions } from "@multica/core/workspace/queries";
-import type { Workspace } from "@multica/core/types";
+import type { GlobalMirrorSummary } from "@multica/core/types";
 import { GlobalChatPane } from "./global-chat-pane";
+import { useGlobalMirrors } from "./use-global-chat";
 import { WorkspaceTilesGrid } from "./workspace-tiles-grid";
 import type { WorkspaceTileSpec } from "./workspace-tile";
 
@@ -19,19 +18,17 @@ import type { WorkspaceTileSpec } from "./workspace-tile";
  *    of workspace tiles, one per workspace the user is a member of. Each
  *    tile mirrors that workspace's "global" chat session in real time.
  *
- * Visual identity is 100% from the existing Multica design system —
- * tokens come from `packages/ui` and the shared Tailwind theme.
- *
- * Mirror session IDs come from the upcoming `/api/global/chat/mirrors`
- * endpoint (MUL-31). Until that lands, tiles fall back to `mirror_session_id
- * = null` and render the empty-state placeholder; see `WorkspaceTile`.
+ * Tile data comes from `GET /api/global/chat/mirrors`: one summary per
+ * workspace the caller is a member of, ordered by recent mirror activity
+ * (workspaces with no dispatch yet sink to the tail, so freshly joined
+ * workspaces don't push active ones off-screen).
  */
 export function GlobalChatView() {
-  const { data: workspaces } = useQuery(workspaceListOptions());
+  const { data: mirrors } = useGlobalMirrors();
 
   const specs = useMemo<WorkspaceTileSpec[]>(
-    () => (workspaces ?? []).map(toTileSpec),
-    [workspaces],
+    () => (mirrors ?? []).map(toTileSpec),
+    [mirrors],
   );
 
   return (
@@ -46,12 +43,12 @@ export function GlobalChatView() {
   );
 }
 
-function toTileSpec(workspace: Workspace): WorkspaceTileSpec {
+function toTileSpec(mirror: GlobalMirrorSummary): WorkspaceTileSpec {
   return {
-    workspace_id: workspace.id,
-    workspace_slug: workspace.slug,
-    workspace_name: workspace.name,
-    mirror_session_id: null,
-    last_message_at: null,
+    workspace_id: mirror.workspace_id,
+    workspace_slug: mirror.workspace_slug,
+    workspace_name: mirror.workspace_name,
+    mirror_session_id: mirror.mirror_session_id,
+    last_message_at: mirror.last_message_at,
   };
 }

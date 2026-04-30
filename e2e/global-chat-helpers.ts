@@ -161,3 +161,39 @@ export async function ensureWorkspaceAgent(
     await client.end();
   }
 }
+
+/**
+ * One row of `GET /api/global/chat/mirrors`. Mirrors `GlobalMirrorSummary`
+ * in `packages/core/types/global-chat.ts`; duplicated here so the E2E
+ * package stays decoupled from the app build graph.
+ */
+export interface MirrorSummaryRow {
+  workspace_id: string;
+  workspace_slug: string;
+  workspace_name: string;
+  mirror_session_id: string | null;
+  last_message_at: string | null;
+  unread_count: number;
+}
+
+/**
+ * Fetches the mirrors endpoint authenticated as the given JWT. Used by the
+ * happy-path spec to assert that, after a dispatch, the calling user's
+ * mirror summary exposes the freshly-created `mirror_session_id` and a
+ * non-null `last_message_at` — i.e. the contract the tile grid was coded
+ * against actually works on the wire.
+ */
+export async function listGlobalMirrors(
+  token: string,
+): Promise<MirrorSummaryRow[]> {
+  const apiBase =
+    process.env.NEXT_PUBLIC_API_URL ||
+    `http://localhost:${process.env.PORT || "8080"}`;
+  const res = await fetch(`${apiBase}/api/global/chat/mirrors`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!res.ok) {
+    throw new Error(`GET /api/global/chat/mirrors failed: ${res.status}`);
+  }
+  return (await res.json()) as MirrorSummaryRow[];
+}
