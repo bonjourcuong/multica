@@ -9,12 +9,11 @@
  *   3. Navigating into the workspace surface still shows the message in the
  *      mirror chat_session, end-to-end persistence confirmed via the API.
  *
- * Tile realtime currently depends on `/api/global/chat/mirrors`
- * (mirror_session_id resolution). When that endpoint is missing the tile
- * cannot subscribe, so the spec falls back to a DB-side assertion that the
- * mirror message was persisted — the contract under test (dispatch +
- * mirror write) is what matters; the in-DOM tile update is a downstream
- * effect we'd re-enable once the mirrors endpoint ships.
+ * The tile grid is driven by `GET /api/global/chat/mirrors` (MUL-100). The
+ * spec asserts the contract directly: after dispatch the endpoint returns
+ * a non-null mirror_session_id and a fresh last_message_at for the target
+ * workspace. The DB-side assertion on `chat_message` insertion is kept as
+ * a defense-in-depth check that the dispatch wrote-through.
  */
 
 import { test, expect } from "@playwright/test";
@@ -24,6 +23,7 @@ import {
   getUserIdByEmail,
   getWorkspaceIdBySlug,
   countMirrorMessagesContaining,
+  listGlobalMirrors,
 } from "./global-chat-helpers";
 import type { TestApiClient } from "./fixtures";
 
@@ -120,10 +120,7 @@ test.describe("Global chat — happy path", () => {
     ).toBeVisible({ timeout: 5000 });
 
     // The corresponding workspace tile must be mounted (i.e. the user is a
-    // member and the grid renders within the cap). The tile's live mirror
-    // hook only updates once `/api/global/chat/mirrors` is wired, so we
-    // don't assert the message body inside the tile yet — see the file
-    // header comment.
+    // member and the grid renders within the cap).
     await expect(
       page.getByRole("article", { name: /e2e workspace mirror/i }),
     ).toBeVisible({ timeout: 5000 });
@@ -138,6 +135,18 @@ test.describe("Global chat — happy path", () => {
         { timeout: 5000, intervals: [250, 500, 1000] },
       )
       .toBe(1);
+
+    // Mirrors endpoint contract: the target workspace's row exposes a
+    // populated mirror_session_id and a fresh last_message_at. Without
+    // this, the tile cannot subscribe — the entire reason MUL-100 ships.
+    const token = api.getToken();
+    if (!token) throw new Error("expected an auth token after login");
+    const mirrors = await listGlobalMirrors(token);
+    const target = mirrors.find((m) => m.workspace_id === targetWorkspaceId);
+    expect(target, "mirrors endpoint missing target workspace").toBeTruthy();
+    expect(target?.workspace_slug).toBe(TARGET_WORKSPACE_SLUG);
+    expect(target?.mirror_session_id).toBeTruthy();
+    expect(target?.last_message_at).toBeTruthy();
 
     // Sanity: the user id we resolved above is the dispatch creator. Avoids
     // a stale ID silently passing the unrelated assertions above.

@@ -276,6 +276,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				r.Get("/", h.ListGlobalMessages)
 				r.Post("/", h.PostGlobalMessage)
 			})
+			r.Get("/mirrors", h.ListGlobalMirrors)
 			r.Post("/cross-ws-query", h.QueryCrossWorkspaceIssues)
 		})
 
