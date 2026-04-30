@@ -8,11 +8,18 @@
  * The default E2E user posts `@<stranger> hello` from `/global/chat`.
  * The backend must:
  *   - return a dispatch entry whose `error` mentions "Je n'ai pas accès" so
- *     the chat surfaces the rejection within 5s;
+ *     the chat surfaces the rejection within 5s (chat-log redundancy);
  *   - NOT create any global_mirror chat_session in the stranger workspace
  *     for this user;
  *   - NOT insert any chat_message in any global_mirror session of the
  *     stranger workspace whose body carries our run marker.
+ *
+ * Tile-state note (MUL-99): the workspace list is membership-filtered, so
+ * the stranger workspace has no tile in the user's grid. The
+ * `not_authorized` tile state in the implementation covers the
+ * defense-in-depth case where a workspace IS in the user's list but the
+ * dispatch is rejected anyway (e.g. stale local cache); that path is
+ * exercised by the unit tests in `packages/views/global-chat/__tests__`.
  *
  * This is the cross-workspace membership filter under test, not just a UI
  * politeness check — silent passes here would be a privilege-escalation bug.
@@ -122,10 +129,21 @@ test.describe("Global chat — cross-workspace permissions", () => {
 
     // The user message body itself shows up in the global chat log —
     // surfaces the rejected attempt to the user without leaking that the
-    // workspace exists.
+    // workspace exists. Kept as the chat-log redundancy assertion called
+    // out in the MUL-99 DoD.
     await expect(
       page.getByTestId("global-chat-messages").getByText(body),
     ).toBeVisible({ timeout: 5000 });
+
+    // No tile renders for the stranger workspace — the workspace list is
+    // membership-filtered, so non-members never see the slug as a tile.
+    // This proves there's no UI leak even though the user typed the slug
+    // in the composer.
+    await expect(
+      page.locator(
+        `[data-testid="workspace-tile"][data-workspace-slug="${STRANGER_WORKSPACE_SLUG}"]`,
+      ),
+    ).toHaveCount(0);
 
     // ADR risk R5 audit — the membership filter must reject the call
     // BEFORE any write happens. Two independent DB checks:

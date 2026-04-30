@@ -2,6 +2,7 @@
 
 import { useMemo, useState } from "react";
 import { Plus } from "lucide-react";
+import type { TileDispatchState } from "@multica/core/global-chat";
 import { WorkspaceTile, type WorkspaceTileSpec } from "./workspace-tile";
 
 /**
@@ -14,6 +15,12 @@ const DEFAULT_TILE_CAP = 12;
 
 export interface WorkspaceTilesGridProps {
   workspaces: WorkspaceTileSpec[];
+  /**
+   * Per-target dispatch state keyed by workspace id. Tiles whose id is
+   * absent from this map render as `idle`. Optional for callers that
+   * don't drive dispatch state (e.g. unit tests).
+   */
+  tileStates?: Record<string, TileDispatchState>;
   /** Override for tests; production always uses {@link DEFAULT_TILE_CAP}. */
   cap?: number;
 }
@@ -28,6 +35,7 @@ export interface WorkspaceTilesGridProps {
  */
 export function WorkspaceTilesGrid({
   workspaces,
+  tileStates,
   cap = DEFAULT_TILE_CAP,
 }: WorkspaceTilesGridProps) {
   const [expanded, setExpanded] = useState(false);
@@ -66,7 +74,11 @@ export function WorkspaceTilesGrid({
           }}
         >
           {visible.map((spec) => (
-            <WorkspaceTile key={spec.workspace_id} workspace={spec} />
+            <WorkspaceTile
+              key={spec.workspace_id}
+              workspace={spec}
+              dispatchState={tileStates?.[spec.workspace_id]}
+            />
           ))}
         </div>
       </div>

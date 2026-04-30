@@ -3,20 +3,37 @@
 import { useEffect, useRef, useState } from "react";
 import { Send } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
+import type { SendGlobalChatMessageResponse } from "@multica/core/api";
 import {
   useGlobalChatMessages,
   useSendGlobalChatMessage,
 } from "./use-global-chat";
+
+export interface GlobalChatPaneProps {
+  /** Called when the user submits a draft, before the POST resolves. */
+  onSubmit?: (body: string) => void;
+  /** Called with the server response when the POST succeeds. */
+  onResolved?: (resp: SendGlobalChatMessageResponse) => void;
+  /** Called when the POST itself fails (transport error, 5xx, etc). */
+  onErrored?: (err: Error) => void;
+}
 
 /**
  * Left column of `/global/chat`. A persistent dialogue with the user's
  * "global" orchestrator agent. Mentioning `@workspace[:agent]` in a message
  * triggers a backend dispatch into that workspace's mirror session, which
  * surfaces in the corresponding tile on the right.
+ *
+ * The pane forwards mutation lifecycle hooks to its parent so the view can
+ * own per-target tile state without the pane needing the workspace list.
  */
-export function GlobalChatPane() {
+export function GlobalChatPane({
+  onSubmit,
+  onResolved,
+  onErrored,
+}: GlobalChatPaneProps = {}) {
   const messages = useGlobalChatMessages();
-  const send = useSendGlobalChatMessage();
+  const send = useSendGlobalChatMessage({ onSubmit, onResolved, onErrored });
   const [draft, setDraft] = useState("");
   const logEndRef = useRef<HTMLDivElement | null>(null);
 
