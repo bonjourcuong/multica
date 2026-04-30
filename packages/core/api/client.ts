@@ -49,6 +49,10 @@ import type {
   ChatPendingTask,
   PendingChatTasksResponse,
   SendChatMessageResponse,
+  GlobalChatSession,
+  GlobalChatMessage,
+  GlobalDispatchTarget,
+  GlobalMirrorSummary,
   Project,
   CreateProjectRequest,
   UpdateProjectRequest,
@@ -104,6 +108,18 @@ export interface ApiClientOptions {
 export interface LoginResponse {
   token: string;
   user: User;
+}
+
+/**
+ * Wrapper returned by POST /api/global/chat/sessions/me/messages. The persisted
+ * message is paired with the per-target dispatch outcome and the parsed mention
+ * echoes so the pane can render delivery state without waiting on the realtime
+ * event. Mirrors `GlobalChatPostResponse` in server/internal/handler/global_chat.go.
+ */
+export interface SendGlobalChatMessageResponse {
+  message: GlobalChatMessage;
+  dispatch: GlobalDispatchTarget[];
+  mentions: { workspace_slug: string; agent_name?: string }[];
 }
 
 // --- Starter content (post-onboarding import) -----------------------------
@@ -977,6 +993,54 @@ export class ApiClient {
 
   async cancelTaskById(taskId: string): Promise<void> {
     await this.fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+  }
+
+  // Global Chat (cross-workspace orchestrator)
+  // Endpoints land in MUL-31 (server). Calls return ApiError 404 until then.
+  async bootstrapGlobalChatSession(): Promise<GlobalChatSession> {
+    return this.fetch(`/api/global/chat/sessions`, { method: "POST" });
+  }
+
+  async getGlobalChatSession(): Promise<GlobalChatSession> {
+    return this.fetch(`/api/global/chat/sessions/me`);
+  }
+
+  async listGlobalChatMessages(params?: {
+    before?: string;
+    limit?: number;
+  }): Promise<GlobalChatMessage[]> {
+    const search = new URLSearchParams();
+    if (params?.before) search.set("before", params.before);
+    if (params?.limit != null) search.set("limit", String(params.limit));
+    const qs = search.toString();
+    return this.fetch(
+      qs
+        ? `/api/global/chat/sessions/me/messages?${qs}`
+        : `/api/global/chat/sessions/me/messages`,
+    );
+  }
+
+  async sendGlobalChatMessage(body: string): Promise<SendGlobalChatMessageResponse> {
+    return this.fetch(`/api/global/chat/sessions/me/messages`, {
+      method: "POST",
+      body: JSON.stringify({ body }),
+    });
+  }
+
+  async cancelGlobalChatAgentRun(messageId: string): Promise<void> {
+    await this.fetch(
+      `/api/global/chat/sessions/me/messages/${messageId}/cancel`,
+      { method: "POST" },
+    );
+  }
+
+  /**
+   * Per-workspace mirror summaries used to render the global chat tile grid.
+   * Returns one entry per workspace the user is a member of, capped server-side.
+   * `mirror_session_id` is null for workspaces the user has never dispatched to.
+   */
+  async listGlobalMirrors(): Promise<GlobalMirrorSummary[]> {
+    return this.fetch(`/api/global/chat/mirrors`);
   }
 
   async listAttachments(issueId: string): Promise<Attachment[]> {

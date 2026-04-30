@@ -56,6 +56,13 @@ export type {
 } from "./document";
 export { PKM_NOT_CONFIGURED_CODE } from "./document";
 export type { ChatSession, ChatMessage, ChatPendingTask, PendingChatTaskItem, PendingChatTasksResponse, SendChatMessageResponse } from "./chat";
+export type {
+  GlobalChatSession,
+  GlobalChatMessage,
+  GlobalChatAuthorKind,
+  GlobalDispatchTarget,
+  GlobalMirrorSummary,
+} from "./global-chat";
 export type { StorageAdapter } from "./storage";
 export type { Project, ProjectStatus, ProjectPriority, CreateProjectRequest, UpdateProjectRequest, ListProjectsResponse } from "./project";
 export type { PinnedItem, PinnedItemType, CreatePinRequest, ReorderPinsRequest } from "./pin";

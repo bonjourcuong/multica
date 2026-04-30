@@ -50,6 +50,11 @@ export const paths = {
   // Cross-workspace meta view (ADR 0001). Aggregates issues from every
   // workspace the current user belongs to.
   global: () => "/global",
+
+  // Cross-workspace orchestrator chat (ADR 2026-04-28-global-orchestrator-chat).
+  // Persistent chat with the user's global agent, paired with a live grid of
+  // per-workspace mirror tiles.
+  globalChat: () => "/global/chat",
 };
 
 export type WorkspacePaths = ReturnType<typeof workspaceScoped>;

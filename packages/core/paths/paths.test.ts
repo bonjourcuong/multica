@@ -32,6 +32,8 @@ describe("paths (global)", () => {
     expect(paths.newWorkspace()).toBe("/workspaces/new");
     expect(paths.invite("inv-1")).toBe("/invite/inv-1");
     expect(paths.authCallback()).toBe("/auth/callback");
+    expect(paths.global()).toBe("/global");
+    expect(paths.globalChat()).toBe("/global/chat");
   });
 });
 

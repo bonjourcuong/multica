@@ -1,7 +1,7 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { Globe, Plus } from "lucide-react";
+import { Globe, MessagesSquare, Plus } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import {
   Tooltip,
@@ -36,8 +36,14 @@ export function WorkspaceRail() {
   const { pathname } = useNavigation();
   const { data: workspaces, isPending } = useQuery(workspaceListOptions());
 
-  const firstSegment = pathname.split("/").filter(Boolean)[0] ?? "";
-  const isGlobalActive = firstSegment === "global";
+  const segments = pathname.split("/").filter(Boolean);
+  const firstSegment = segments[0] ?? "";
+  const isGlobalSection = firstSegment === "global";
+  // The two cross-workspace surfaces (kanban + chat) live under /global/*.
+  // Highlight whichever one the user is currently on; otherwise the rail
+  // keeps both icons inactive even when one of them is rendering.
+  const isGlobalChatActive = isGlobalSection && segments[1] === "chat";
+  const isGlobalKanbanActive = isGlobalSection && !isGlobalChatActive;
   const openCreateWorkspaceModal = () =>
     useModalStore.getState().open("create-workspace");
 
@@ -53,9 +59,17 @@ export function WorkspaceRail() {
       <RailLink
         href={paths.global()}
         label="All workspaces"
-        active={isGlobalActive}
+        active={isGlobalKanbanActive}
       >
         <Globe className="size-4" aria-hidden="true" />
+      </RailLink>
+
+      <RailLink
+        href={paths.globalChat()}
+        label="Global chat"
+        active={isGlobalChatActive}
+      >
+        <MessagesSquare className="size-4" aria-hidden="true" />
       </RailLink>
 
       <div className="my-1 h-px w-6 bg-border" aria-hidden="true" />

@@ -5,6 +5,7 @@ export type {
   ImportStarterContentResponse,
   ImportStarterIssuePayload,
   ImportStarterWelcomeIssueTemplate,
+  SendGlobalChatMessageResponse,
 } from "./client";
 export { WSClient } from "./ws-client";
 
