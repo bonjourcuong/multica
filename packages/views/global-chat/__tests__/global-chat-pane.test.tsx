@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import type { SendGlobalChatMessageResponse } from "@multica/core/api";
 import type { GlobalChatMessage } from "@multica/core/types";
 import { GlobalChatPane } from "../global-chat-pane";
 
-const sendGlobalChatMessage = vi.fn<(body: string) => Promise<GlobalChatMessage>>();
+const sendGlobalChatMessage = vi.fn<(body: string) => Promise<SendGlobalChatMessageResponse>>();
 const listGlobalChatMessages = vi.fn<() => Promise<GlobalChatMessage[]>>();
 const getGlobalChatSession = vi.fn(() =>
   Promise.resolve({
@@ -39,6 +40,12 @@ function makeMessage(over: Partial<GlobalChatMessage> = {}): GlobalChatMessage {
   };
 }
 
+function makeSendResponse(
+  message: GlobalChatMessage,
+): SendGlobalChatMessageResponse {
+  return { message, dispatch: [], mentions: [] };
+}
+
 function renderPane() {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
@@ -58,7 +65,9 @@ beforeEach(() => {
 
 describe("GlobalChatPane", () => {
   it("submits the draft on Enter, clears the input, and calls the API", async () => {
-    sendGlobalChatMessage.mockResolvedValue(makeMessage({ body: "hello" }));
+    sendGlobalChatMessage.mockResolvedValue(
+      makeSendResponse(makeMessage({ body: "hello" })),
+    );
 
     const { getByTestId } = renderPane();
     const input = getByTestId("global-chat-input") as HTMLTextAreaElement;

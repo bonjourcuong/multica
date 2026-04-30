@@ -51,6 +51,7 @@ import type {
   SendChatMessageResponse,
   GlobalChatSession,
   GlobalChatMessage,
+  GlobalDispatchTarget,
   GlobalMirrorSummary,
   Project,
   CreateProjectRequest,
@@ -107,6 +108,18 @@ export interface ApiClientOptions {
 export interface LoginResponse {
   token: string;
   user: User;
+}
+
+/**
+ * Wrapper returned by POST /api/global/chat/sessions/me/messages. The persisted
+ * message is paired with the per-target dispatch outcome and the parsed mention
+ * echoes so the pane can render delivery state without waiting on the realtime
+ * event. Mirrors `GlobalChatPostResponse` in server/internal/handler/global_chat.go.
+ */
+export interface SendGlobalChatMessageResponse {
+  message: GlobalChatMessage;
+  dispatch: GlobalDispatchTarget[];
+  mentions: { workspace_slug: string; agent_name?: string }[];
 }
 
 // --- Starter content (post-onboarding import) -----------------------------
@@ -993,11 +1006,11 @@ export class ApiClient {
   }
 
   async listGlobalChatMessages(params?: {
-    cursor?: string;
+    before?: string;
     limit?: number;
   }): Promise<GlobalChatMessage[]> {
     const search = new URLSearchParams();
-    if (params?.cursor) search.set("cursor", params.cursor);
+    if (params?.before) search.set("before", params.before);
     if (params?.limit != null) search.set("limit", String(params.limit));
     const qs = search.toString();
     return this.fetch(
@@ -1007,7 +1020,7 @@ export class ApiClient {
     );
   }
 
-  async sendGlobalChatMessage(body: string): Promise<GlobalChatMessage> {
+  async sendGlobalChatMessage(body: string): Promise<SendGlobalChatMessageResponse> {
     return this.fetch(`/api/global/chat/sessions/me/messages`, {
       method: "POST",
       body: JSON.stringify({ body }),

@@ -1,7 +1,7 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient, queryOptions } from "@tanstack/react-query";
-import { api } from "@multica/core/api";
+import { api, type SendGlobalChatMessageResponse } from "@multica/core/api";
 import type { GlobalChatMessage, GlobalChatSession } from "@multica/core/types";
 
 /**
@@ -46,14 +46,19 @@ export function useGlobalChatMessages() {
  */
 export function useSendGlobalChatMessage() {
   const qc = useQueryClient();
-  return useMutation<GlobalChatMessage, Error, string>({
+  return useMutation<SendGlobalChatMessageResponse, Error, string>({
     mutationFn: (body) => api.sendGlobalChatMessage(body),
-    onSuccess: (created) => {
+    onSuccess: (resp) => {
       qc.setQueryData<GlobalChatMessage[]>(
         globalChatKeys.messages(),
-        (prev) => (prev ? [...prev, created] : [created]),
+        (prev) => (prev ? [...prev, resp.message] : [resp.message]),
       );
     },
+    // Defense-in-depth: even if the optimistic write above goes stale (e.g.
+    // server contract drifts again), invalidating on settle self-heals on the
+    // next read instead of leaving the cache wrong indefinitely.
+    onSettled: () =>
+      qc.invalidateQueries({ queryKey: globalChatKeys.messages() }),
   });
 }
 
