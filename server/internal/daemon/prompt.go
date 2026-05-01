@@ -11,6 +11,13 @@ import (
 // Keep this minimal — detailed instructions live in CLAUDE.md / AGENTS.md
 // injected by execenv.InjectRuntimeConfig.
 func BuildPrompt(task Task) string {
+	// Global-chat must run BEFORE the workspace-chat branch: a global task has
+	// no ChatSessionID at all, so checking GlobalSessionID first keeps the two
+	// dispatch paths cleanly disjoint and prevents a future GlobalSessionID +
+	// ChatSessionID combination from silently choosing the wrong branch.
+	if task.GlobalSessionID != "" {
+		return buildGlobalChatPrompt(task)
+	}
 	if task.ChatSessionID != "" {
 		return buildChatPrompt(task)
 	}
@@ -63,6 +70,19 @@ func buildChatPrompt(task Task) string {
 	b.WriteString("You are running as a chat assistant for a Multica workspace.\n")
 	b.WriteString("A user is chatting with you directly. Respond to their message.\n\n")
 	fmt.Fprintf(&b, "User message:\n%s\n", task.ChatMessage)
+	return b.String()
+}
+
+// buildGlobalChatPrompt constructs a prompt for the user-level global chat
+// (no workspace, no Multica issue). The agent answers as a generic CLI
+// assistant rooted at the runtime's working directory; workspace framing is
+// intentionally omitted so multica issue / workspace commands don't leak in.
+func buildGlobalChatPrompt(task Task) string {
+	var b strings.Builder
+	b.WriteString("You are answering a global-chat message from the user.\n")
+	b.WriteString("This is a user-level conversation, not tied to any Multica workspace or issue.\n")
+	b.WriteString("Do not run `multica issue ...` or `multica workspace ...` commands; there is no issue or workspace context.\n\n")
+	fmt.Fprintf(&b, "User message:\n%s\n", task.GlobalChatMessage)
 	return b.String()
 }
 

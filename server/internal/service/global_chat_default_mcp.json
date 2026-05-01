@@ -1,0 +1,23 @@
+{
+  "_comment": "Default mcp_config seeded into the Claude Code (terminator-9999) global agent at bootstrap. EnsureClaudeCodeGlobalAgent reads this file, substitutes ${VAR} tokens from process env, and writes the resolved JSON to agent.mcp_config. The placeholders below MUST stay placeholders in the repo; real values come from the deploy env. Env-var contract + rotation runbook: PKM-CUONG/GROWTH/PROJECTS/multica-fork/runbooks/2026-05-01-global-chat-v3-rollout.md.",
+  "mcpServers": {
+    "honcho": {
+      "command": "python3",
+      "args": ["${MULTICA_GLOBAL_AGENT_HONCHO_SERVER_PATH}"],
+      "env": {
+        "HONCHO_BASE_URL": "${MULTICA_GLOBAL_AGENT_HONCHO_BASE_URL}",
+        "HONCHO_API_KEY": "${MULTICA_GLOBAL_AGENT_HONCHO_API_KEY}",
+        "HONCHO_WORKSPACE": "${MULTICA_GLOBAL_AGENT_HONCHO_WORKSPACE}",
+        "HONCHO_USER": "${MULTICA_GLOBAL_AGENT_HONCHO_USER}",
+        "HONCHO_ASSISTANT": "claude-code"
+      }
+    },
+    "jcodemunch": {
+      "command": "jcodemunch-mcp",
+      "args": [],
+      "env": {
+        "JCODEMUNCH_LOG_LEVEL": "INFO"
+      }
+    }
+  }
+}
