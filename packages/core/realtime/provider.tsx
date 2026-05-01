@@ -26,6 +26,17 @@ type EventHandler = (payload: unknown, actorId?: string) => void;
 interface WSContextValue {
   subscribe: (event: WSEventType, handler: EventHandler) => () => void;
   onReconnect: (callback: () => void) => () => void;
+  /**
+   * Create an additional WSClient bound to a specific workspace slug,
+   * independent of the URL-bound main connection. The caller is responsible
+   * for invoking `connect()` / `disconnect()` and registering handlers.
+   *
+   * Used by cross-workspace views (e.g. `/global` Kanban) that need realtime
+   * events from workspaces other than the current URL-bound workspace.
+   * Returns null when the user is not authenticated or when token-mode auth
+   * has no token in storage.
+   */
+  createWorkspaceConnection: (workspaceSlug: string) => WSClient | null;
 }
 
 const WSContext = createContext<WSContextValue | null>(null);
@@ -136,8 +147,50 @@ export function WSProvider({
     [wsClient],
   );
 
+  // Factory for extra connections used by cross-workspace views. Mirrors the
+  // construction inside the main effect above (same wsUrl / cookieAuth /
+  // identity primitives), but binds to the caller-provided slug instead of
+  // the URL-driven `_currentSlug`. Each call returns a fresh, disconnected
+  // WSClient; the caller drives its lifecycle.
+  const createWorkspaceConnection = useCallback(
+    (workspaceSlug: string): WSClient | null => {
+      if (!user) return null;
+      const token = cookieAuth ? null : storage.getItem("multica_token");
+      if (!cookieAuth && !token) return null;
+      const ws = new WSClient(wsUrl, {
+        logger: createLogger("ws.cross"),
+        cookieAuth,
+        identity:
+          identityPlatform || identityVersion || identityOS
+            ? {
+                platform: identityPlatform,
+                version: identityVersion,
+                os: identityOS,
+              }
+            : undefined,
+      });
+      ws.setAuth(token, workspaceSlug);
+      return ws;
+    },
+    [
+      user,
+      cookieAuth,
+      storage,
+      wsUrl,
+      identityPlatform,
+      identityVersion,
+      identityOS,
+    ],
+  );
+
   return (
-    <WSContext.Provider value={{ subscribe, onReconnect: onReconnectCb }}>
+    <WSContext.Provider
+      value={{
+        subscribe,
+        onReconnect: onReconnectCb,
+        createWorkspaceConnection,
+      }}
+    >
       {children}
     </WSContext.Provider>
   );

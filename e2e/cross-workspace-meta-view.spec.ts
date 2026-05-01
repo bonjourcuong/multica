@@ -3,9 +3,8 @@
  *
  * Covers the shipped `/global` Kanban contract: rail entry, 5-column board,
  * workspace badges, card navigation, workspace filtering, URL persistence,
- * and membership isolation. The current product does not yet expose a status
- * filter control or realtime invalidation for `/global`; those acceptance
- * criteria are kept as skipped tests so CI documents the remaining gaps.
+ * membership isolation, status filtering, and realtime fan-out across every
+ * workspace the user is a member of.
  */
 
 import { test, expect } from "@playwright/test";
@@ -168,13 +167,16 @@ test.describe("Cross-workspace meta view", () => {
     await expect(page.getByTestId("global-kanban-card")).toHaveCount(30);
   });
 
-  test.skip("realtime issue creation appears on /global within 2s", async () => {
-    // Gap as of 2026-05-01: the global Kanban does not subscribe to
-    // workspace realtime channels or invalidate the cross-workspace query.
-    await createRealtimeIssue(
-      fixture.workspaces[0]!,
-      fixture.userId,
-      `E2E Meta realtime ${Date.now()}`,
-    );
+  test("realtime issue creation appears on /global within 2s", async ({
+    page,
+  }) => {
+    await page.goto("/global");
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(30);
+
+    const title = `E2E Meta realtime ${Date.now()}`;
+    await createRealtimeIssue(fixture.workspaces[0]!, fixture.token, title);
+
+    await expect(page.getByText(title)).toBeVisible({ timeout: 2000 });
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(31);
   });
 });

@@ -9,6 +9,7 @@ import type { CrossWorkspaceIssue, IssueStatus } from "@multica/core/types";
 import { useNavigation } from "../../navigation";
 import { GlobalKanbanColumn } from "./global-kanban-column";
 import { GlobalKanbanFilters } from "./global-kanban-filters";
+import { useCrossWorkspaceIssueRealtime } from "./use-cross-workspace-realtime";
 
 /**
  * Five status columns shown on the cross-workspace Kanban. `blocked` and
@@ -99,11 +100,18 @@ export function parseStatusParam(
  * via `NavigationAdapter.replace()` (no history entry per click — pile of
  * undo entries on a filter UI is hostile).
  *
- * `assignee_ids`, `priority` filters and cross-workspace realtime fan-out
- * remain tracked as v2 follow-ups (see PR description).
+ * Realtime: opens one extra WS connection per member workspace and refetches
+ * the board on any issue event from any of them — see
+ * {@link useCrossWorkspaceIssueRealtime}. The main `WSProvider` connection is
+ * URL-bound to the current workspace only, so cross-workspace fan-out has to
+ * come through dedicated extra connections.
+ *
+ * `assignee_ids` and `priority` filters remain tracked as v2 follow-ups
+ * (see PR description).
  */
 export function GlobalKanban() {
   const nav = useNavigation();
+  useCrossWorkspaceIssueRealtime();
   const workspaceIds = useMemo(
     () => parseWorkspaceIdsParam(nav.searchParams.get("workspace_ids")),
     [nav.searchParams],
