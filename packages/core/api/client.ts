@@ -138,6 +138,16 @@ export interface SendGlobalChatMessageResponse {
   mentions: { workspace_slug: string; agent_name?: string }[];
 }
 
+/**
+ * Payload accepted by POST /api/global/chat/sessions/me/messages. `agent_id`
+ * is optional — when omitted the server falls back to the user's default
+ * global agent (V1 behaviour preserved for backwards compat with old clients).
+ */
+export interface SendGlobalChatMessageRequest {
+  body: string;
+  agent_id?: string;
+}
+
 // --- Starter content (post-onboarding import) -----------------------------
 // Shape mirrors the Go request/response in handler/onboarding.go.
 //
@@ -1067,11 +1077,23 @@ export class ApiClient {
     );
   }
 
-  async sendGlobalChatMessage(body: string): Promise<SendGlobalChatMessageResponse> {
+  async sendGlobalChatMessage(
+    payload: SendGlobalChatMessageRequest,
+  ): Promise<SendGlobalChatMessageResponse> {
     return this.fetch(`/api/global/chat/sessions/me/messages`, {
       method: "POST",
-      body: JSON.stringify({ body }),
+      body: JSON.stringify(payload),
     });
+  }
+
+  /**
+   * Lists agents that can answer the global lane on behalf of the viewer.
+   * Backed by `GET /api/global/chat/agents` (V3, MUL-137). Includes Claude
+   * Code (terminator-9999) plus the user's twin and any other agents wired
+   * for global dispatch. Archived agents are filtered server-side.
+   */
+  async listGlobalChatAgents(): Promise<Agent[]> {
+    return this.fetch(`/api/global/chat/agents`);
   }
 
   async cancelGlobalChatAgentRun(messageId: string): Promise<void> {

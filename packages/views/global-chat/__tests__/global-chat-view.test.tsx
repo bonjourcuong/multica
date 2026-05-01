@@ -1,8 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 import { render, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import type { SendGlobalChatMessageResponse } from "@multica/core/api";
 import type {
+  SendGlobalChatMessageRequest,
+  SendGlobalChatMessageResponse,
+} from "@multica/core/api";
+import type {
+  Agent,
   GlobalChatMessage,
   GlobalMirrorSummary,
 } from "@multica/core/types";
@@ -14,15 +18,23 @@ vi.mock("../use-workspace-mirror", () => ({
   useWorkspaceMirror: () => ({ messages: [] }),
 }));
 
+vi.mock("@multica/core/auth", () => ({
+  useAuthStore: (selector: (s: { user: { id: string } }) => unknown) =>
+    selector({ user: { id: "u-1" } }),
+}));
+
 const sendGlobalChatMessage =
-  vi.fn<(body: string) => Promise<SendGlobalChatMessageResponse>>();
+  vi.fn<(payload: SendGlobalChatMessageRequest) => Promise<SendGlobalChatMessageResponse>>();
 const listGlobalChatMessages = vi.fn<() => Promise<GlobalChatMessage[]>>();
 const listGlobalMirrors = vi.fn<() => Promise<GlobalMirrorSummary[]>>();
+const listGlobalChatAgents = vi.fn<() => Promise<Agent[]>>();
 
 vi.mock("@multica/core/api", () => ({
   api: {
-    sendGlobalChatMessage: (body: string) => sendGlobalChatMessage(body),
+    sendGlobalChatMessage: (payload: SendGlobalChatMessageRequest) =>
+      sendGlobalChatMessage(payload),
     listGlobalChatMessages: () => listGlobalChatMessages(),
+    listGlobalChatAgents: () => listGlobalChatAgents(),
     getGlobalChatSession: () =>
       Promise.resolve({
         id: "ses-1",
@@ -42,6 +54,34 @@ vi.mock("@multica/core/api", () => ({
     listGlobalMirrors: () => listGlobalMirrors(),
   },
 }));
+
+function makeAgent(over: Partial<Agent> = {}): Agent {
+  return {
+    id: "11111111-1111-4111-8111-111111111111",
+    workspace_id: "ws-global",
+    runtime_id: "runtime-1",
+    name: "Claude Code (terminator-9999)",
+    description: "",
+    instructions: "",
+    avatar_url: null,
+    runtime_mode: "cloud",
+    runtime_config: {},
+    custom_env: {},
+    custom_args: [],
+    custom_env_redacted: false,
+    visibility: "private",
+    status: "active",
+    max_concurrent_tasks: 1,
+    model: "claude-opus-4-7",
+    owner_id: "u-1",
+    skills: [],
+    created_at: "2026-04-28T00:00:00Z",
+    updated_at: "2026-04-28T00:00:00Z",
+    archived_at: null,
+    archived_by: null,
+    ...over,
+  } as Agent;
+}
 
 function makeMirror(
   over: Partial<GlobalMirrorSummary> = {},
@@ -91,6 +131,13 @@ beforeEach(() => {
     makeMirror({ workspace_id: "ws-1", workspace_slug: "ws-1", workspace_name: "Workspace 1" }),
     makeMirror({ workspace_id: "ws-2", workspace_slug: "ws-2", workspace_name: "Workspace 2" }),
   ]);
+  listGlobalChatAgents.mockReset();
+  listGlobalChatAgents.mockResolvedValue([makeAgent()]);
+  try {
+    window.localStorage.clear();
+  } catch {
+    /* jsdom may throw if storage is shimmed */
+  }
 });
 
 describe("GlobalChatView per-target tile state", () => {
