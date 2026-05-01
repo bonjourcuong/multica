@@ -140,6 +140,48 @@ func (s *TaskService) EnqueueChatTask(ctx context.Context, chatSession db.ChatSe
 	return task, nil
 }
 
+// EnqueueGlobalChatTask creates a queued task for a global chat session.
+// Mirrors EnqueueChatTask but binds the task to global_session_id instead
+// of chat_session_id, and takes the agent ID explicitly because the
+// global session itself is twin-pinned (V1 design) and the V3 picker
+// per-message overrides which agent answers a given message.
+//
+// Caller is responsible for verifying the agent is one of the user's
+// global agents (use GlobalChatService.GetGlobalAgentForUser); this
+// function only checks the runtime/archive invariants the daemon needs
+// to actually run the task.
+func (s *TaskService) EnqueueGlobalChatTask(ctx context.Context, sess db.GlobalChatSession, agentID pgtype.UUID) (db.AgentTaskQueue, error) {
+	agent, err := s.Queries.GetAgent(ctx, agentID)
+	if err != nil {
+		slog.Error("global chat task enqueue failed", "global_session_id", util.UUIDToString(sess.ID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("load agent: %w", err)
+	}
+	if agent.ArchivedAt.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent is archived")
+	}
+	if !agent.RuntimeID.Valid {
+		return db.AgentTaskQueue{}, fmt.Errorf("agent has no runtime")
+	}
+
+	task, err := s.Queries.CreateGlobalChatTask(ctx, db.CreateGlobalChatTaskParams{
+		AgentID:         agentID,
+		RuntimeID:       agent.RuntimeID,
+		Priority:        2, // medium priority for chat
+		GlobalSessionID: pgtype.UUID{Bytes: sess.ID.Bytes, Valid: true},
+	})
+	if err != nil {
+		slog.Error("global chat task enqueue failed", "global_session_id", util.UUIDToString(sess.ID), "error", err)
+		return db.AgentTaskQueue{}, fmt.Errorf("create global chat task: %w", err)
+	}
+
+	slog.Info("global chat task enqueued",
+		"task_id", util.UUIDToString(task.ID),
+		"global_session_id", util.UUIDToString(sess.ID),
+		"agent_id", util.UUIDToString(agentID),
+	)
+	return task, nil
+}
+
 // CancelTasksForIssue cancels every active task on the issue, reconciles each
 // affected agent's status, and broadcasts task:cancelled events so frontends
 // clear their live cards.
@@ -487,6 +529,16 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 		s.broadcastChatDone(ctx, task)
 	}
 
+	// Global chat tasks (V3 picker): same writeback shape as workspace
+	// chat tasks but the message lands in `global_chat_message` and the
+	// realtime event flies on the per-user channel instead of a workspace
+	// channel. Looking up the session here (one extra read, not in the
+	// hot path because completion is the terminal call per task) is
+	// cheaper than threading user_id through the daemon protocol.
+	if task.GlobalSessionID.Valid {
+		s.writeGlobalChatAgentReply(ctx, task, result)
+	}
+
 	// Reconcile agent status
 	s.ReconcileAgentStatus(ctx, task.AgentID)
 
@@ -494,6 +546,57 @@ func (s *TaskService) CompleteTask(ctx context.Context, taskID pgtype.UUID, resu
 	s.broadcastTaskEvent(ctx, protocol.EventTaskCompleted, task)
 
 	return &task, nil
+}
+
+// writeGlobalChatAgentReply persists the agent's reply to the global
+// chat thread and publishes the per-user realtime event so the global
+// pane refreshes. Called from CompleteTask when task.GlobalSessionID is
+// set; quietly logs and returns on transient errors so a failed event
+// publish never blocks the overall task completion path.
+func (s *TaskService) writeGlobalChatAgentReply(ctx context.Context, task db.AgentTaskQueue, result []byte) {
+	var payload protocol.TaskCompletedPayload
+	if err := json.Unmarshal(result, &payload); err != nil || payload.Output == "" {
+		return
+	}
+	sess, err := s.Queries.GetGlobalChatSession(ctx, task.GlobalSessionID)
+	if err != nil {
+		slog.Error("global chat reply: lookup session failed",
+			"task_id", util.UUIDToString(task.ID),
+			"global_session_id", util.UUIDToString(task.GlobalSessionID),
+			"error", err,
+		)
+		return
+	}
+	body := redact.Text(payload.Output)
+	msg, err := s.Queries.InsertGlobalChatMessage(ctx, db.InsertGlobalChatMessageParams{
+		GlobalSessionID: task.GlobalSessionID,
+		AuthorKind:      "agent",
+		AuthorID:        task.AgentID,
+		Body:            body,
+		Metadata:        []byte("{}"),
+	})
+	if err != nil {
+		slog.Error("global chat reply: insert message failed",
+			"task_id", util.UUIDToString(task.ID),
+			"global_session_id", util.UUIDToString(task.GlobalSessionID),
+			"error", err,
+		)
+		return
+	}
+	s.Bus.Publish(events.Event{
+		Type:      protocol.EventGlobalChatMessage,
+		UserID:    util.UUIDToString(sess.UserID),
+		ActorType: msg.AuthorKind,
+		ActorID:   util.UUIDToString(msg.AuthorID),
+		Payload: protocol.GlobalChatMessagePayload{
+			GlobalSessionID: util.UUIDToString(msg.GlobalSessionID),
+			MessageID:       util.UUIDToString(msg.ID),
+			AuthorKind:      msg.AuthorKind,
+			AuthorID:        util.UUIDToString(msg.AuthorID),
+			Body:            msg.Body,
+			CreatedAt:       util.TimestampToString(msg.CreatedAt),
+		},
+	})
 }
 
 // FailTask marks a task as failed.

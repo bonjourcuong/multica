@@ -74,6 +74,18 @@ SELECT * FROM agent_runtime
 WHERE workspace_id = $1 AND owner_id = $2
 ORDER BY created_at ASC;
 
+-- name: GetAgentRuntimeByOwnerAndName :one
+-- Resolves a runtime by (owner_id, name) without scoping to a workspace.
+-- Used by EnsureClaudeCodeGlobalAgent to bind the per-user global agent
+-- to the same `Claude (terminator-9999)` runtime the user already runs
+-- Marvel agents on. Returns the oldest match so a re-registered runtime
+-- (which mints a fresh row) doesn't shadow the canonical one until the
+-- old offline row is reaped.
+SELECT * FROM agent_runtime
+WHERE owner_id = $1 AND name = $2
+ORDER BY created_at ASC
+LIMIT 1;
+
 -- name: DeleteAgentRuntime :exec
 DELETE FROM agent_runtime WHERE id = $1;
 

@@ -839,6 +839,31 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Global chat task (V3, MUL-137): no workspace, no chat_session_id.
+	// Source the latest user message from `global_chat_message` for the
+	// chat prompt, and resume the daemon's `claude` session by reusing
+	// the most recent task's session_id on this global session (same
+	// fallback chain as workspace chat tasks, just keyed differently).
+	if task.GlobalSessionID.Valid {
+		if sess, err := h.Queries.GetGlobalChatSession(r.Context(), task.GlobalSessionID); err == nil {
+			resp.GlobalSessionID = uuidToString(sess.ID)
+			if msgs, err := h.Queries.ListGlobalChatMessages(r.Context(), db.ListGlobalChatMessagesParams{
+				GlobalSessionID: sess.ID,
+				Limit:           50,
+			}); err == nil {
+				// ListGlobalChatMessages returns reverse-chronological
+				// (newest first) — walk forward to find the latest
+				// user-authored row to feed the daemon as the prompt.
+				for _, m := range msgs {
+					if m.AuthorKind == "user" {
+						resp.ChatMessage = m.Body
+						break
+					}
+				}
+			}
+		}
+	}
+
 	// Autopilot run_only task: resolve workspace from autopilot_run →
 	// autopilot, and include the autopilot instructions because there is no
 	// issue for the agent to fetch.
@@ -877,7 +902,12 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 	// upstream routed a foreign-workspace task here. Both cases must hard-
 	// fail AND cancel the just-dispatched task so the queue / agent status
 	// don't sit stuck until the stale-task sweeper fires minutes later.
-	if resp.WorkspaceID == "" || resp.WorkspaceID != runtimeWorkspaceID {
+	//
+	// Global chat tasks (V3) are exempt: they have no workspace by design
+	// and the runtime ownership check above (requireDaemonRuntimeAccess)
+	// already guarantees the claiming daemon owns the runtime that the
+	// global agent is bound to.
+	if !task.GlobalSessionID.Valid && (resp.WorkspaceID == "" || resp.WorkspaceID != runtimeWorkspaceID) {
 		outcome = "error_workspace"
 		slog.Error("task claim: workspace isolation check failed, cancelling task",
 			"task_id", uuidToString(task.ID),
@@ -886,6 +916,7 @@ func (h *Handler) ClaimTaskByRuntime(w http.ResponseWriter, r *http.Request) {
 			"resolved_workspace", resp.WorkspaceID,
 			"has_issue", task.IssueID.Valid,
 			"has_chat", task.ChatSessionID.Valid,
+			"has_global", task.GlobalSessionID.Valid,
 			"has_autopilot_run", task.AutopilotRunID.Valid,
 		)
 		if _, cerr := h.TaskService.CancelTask(r.Context(), task.ID); cerr != nil {

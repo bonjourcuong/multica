@@ -3,6 +3,13 @@ SELECT * FROM global_chat_session
 WHERE user_id = $1
 LIMIT 1;
 
+-- name: GetGlobalChatSession :one
+-- Lookup by primary key. Backs the daemon claim-task path and the task
+-- callback writeback: TaskService.CompleteTask resolves the owning user
+-- from this row before publishing the per-user realtime event.
+SELECT * FROM global_chat_session
+WHERE id = $1;
+
 -- name: CreateGlobalChatSession :one
 INSERT INTO global_chat_session (user_id, agent_id, title)
 VALUES ($1, $2, $3)

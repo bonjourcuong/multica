@@ -57,6 +57,28 @@ func (q *Queries) CreateGlobalChatSession(ctx context.Context, arg CreateGlobalC
 	return i, err
 }
 
+const getGlobalChatSession = `-- name: GetGlobalChatSession :one
+SELECT id, user_id, agent_id, title, created_at, archived_at FROM global_chat_session
+WHERE id = $1
+`
+
+// Lookup by primary key. Backs the daemon claim-task path and the task
+// callback writeback: TaskService.CompleteTask resolves the owning user
+// from this row before publishing the per-user realtime event.
+func (q *Queries) GetGlobalChatSession(ctx context.Context, id pgtype.UUID) (GlobalChatSession, error) {
+	row := q.db.QueryRow(ctx, getGlobalChatSession, id)
+	var i GlobalChatSession
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.AgentID,
+		&i.Title,
+		&i.CreatedAt,
+		&i.ArchivedAt,
+	)
+	return i, err
+}
+
 const getGlobalChatSessionByUser = `-- name: GetGlobalChatSessionByUser :one
 SELECT id, user_id, agent_id, title, created_at, archived_at FROM global_chat_session
 WHERE user_id = $1
