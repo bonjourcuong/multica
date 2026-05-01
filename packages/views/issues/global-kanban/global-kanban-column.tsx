@@ -27,6 +27,7 @@ export function GlobalKanbanColumn({
   return (
     <div
       className={`flex w-[280px] shrink-0 flex-col rounded-xl ${cfg.columnBg} p-2`}
+      data-testid={`global-kanban-column-${status}`}
     >
       <div className="mb-2 flex items-center justify-between px-1.5">
         <div className="flex items-center gap-2">

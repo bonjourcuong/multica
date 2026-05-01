@@ -41,6 +41,7 @@ export const CrossWorkspaceCard = memo(function CrossWorkspaceCard({
       href={href}
       aria-label={`${issue.identifier} ${issue.title} (${issue.workspace.name})`}
       className="group block focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring rounded-lg"
+      data-testid="global-kanban-card"
     >
       <div className="rounded-lg border-[0.5px] border-border bg-card py-3 px-2.5 shadow-[0_3px_6px_-2px_rgba(0,0,0,0.02),0_1px_1px_0_rgba(0,0,0,0.04)] transition-colors group-hover:border-accent group-hover:bg-accent">
         <div className="flex items-center gap-1.5">
