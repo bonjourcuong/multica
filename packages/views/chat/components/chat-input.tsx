@@ -23,6 +23,16 @@ interface ChatInputProps {
   /** Rendered inside the rounded container, above the editor — attached
    *  context cards, drafts, etc. */
   topSlot?: ReactNode;
+  /**
+   * Active session id for the lane this input belongs to. Drives the draft
+   * key so each session keeps its own buffer.
+   */
+  activeSessionId: string | null;
+  /**
+   * Currently selected agent for the lane — used as part of the new-chat
+   * draft key so switching agents doesn't trample the in-progress prompt.
+   */
+  selectedAgentId: string | null;
 }
 
 export function ChatInput({
@@ -34,10 +44,10 @@ export function ChatInput({
   leftAdornment,
   rightAdornment,
   topSlot,
+  activeSessionId,
+  selectedAgentId,
 }: ChatInputProps) {
   const editorRef = useRef<ContentEditorRef>(null);
-  const activeSessionId = useChatStore((s) => s.activeSessionId);
-  const selectedAgentId = useChatStore((s) => s.selectedAgentId);
   // Scope the new-chat draft by agent:
   //   1. Switching agents while composing a brand-new chat gives each
   //      agent its own draft (no cross-agent leakage).
