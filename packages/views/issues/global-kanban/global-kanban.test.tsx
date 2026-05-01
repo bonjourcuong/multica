@@ -1,13 +1,13 @@
 import { describe, expect, it, vi, beforeEach } from "vitest";
-import { render, screen, fireEvent } from "@testing-library/react";
+import { render, screen, fireEvent, within } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type { CrossWorkspaceIssue, Workspace } from "@multica/core/types";
 import { NavigationProvider } from "../../navigation";
 import type { NavigationAdapter } from "../../navigation/types";
-import { GlobalKanban, parseWorkspaceIdsParam } from "./index";
+import { GlobalKanban, parseStatusParam, parseWorkspaceIdsParam } from "./index";
 
 const listCrossWorkspaceIssues = vi.fn<
-  (params?: { workspace_ids?: string[] }) => Promise<{
+  (params?: { workspace_ids?: string[]; status?: string[] }) => Promise<{
     issues: CrossWorkspaceIssue[];
     next_cursor: string | null;
     has_more: boolean;
@@ -18,8 +18,10 @@ const listWorkspaces = vi.fn<() => Promise<Workspace[]>>();
 
 vi.mock("@multica/core/api", () => ({
   api: {
-    listCrossWorkspaceIssues: (params?: { workspace_ids?: string[] }) =>
-      listCrossWorkspaceIssues(params),
+    listCrossWorkspaceIssues: (params?: {
+      workspace_ids?: string[];
+      status?: string[];
+    }) => listCrossWorkspaceIssues(params),
     listWorkspaces: () => listWorkspaces(),
   },
 }));
@@ -120,6 +122,27 @@ describe("parseWorkspaceIdsParam", () => {
   });
 });
 
+describe("parseStatusParam", () => {
+  it("returns [] for null / empty / whitespace input", () => {
+    expect(parseStatusParam(null)).toEqual([]);
+    expect(parseStatusParam(undefined)).toEqual([]);
+    expect(parseStatusParam("")).toEqual([]);
+    expect(parseStatusParam(",,, ,")).toEqual([]);
+  });
+
+  it("keeps known board statuses and drops anything else", () => {
+    expect(parseStatusParam("in_progress, todo")).toEqual([
+      "in_progress",
+      "todo",
+    ]);
+    // `cancelled` and `blocked` are not part of the global board (ADR 0001),
+    // so a hand-typed URL must not leak them through.
+    expect(parseStatusParam("cancelled,in_progress,bogus,blocked")).toEqual([
+      "in_progress",
+    ]);
+  });
+});
+
 describe("GlobalKanban", () => {
   beforeEach(() => {
     listCrossWorkspaceIssues.mockReset();
@@ -171,10 +194,21 @@ describe("GlobalKanban", () => {
     });
     renderKanban();
 
-    for (const label of ["Backlog", "Todo", "In Progress", "In Review", "Done"]) {
-      expect(await screen.findByText(label)).toBeInTheDocument();
+    // Wait for cards to land before scoping queries to the column headers.
+    await screen.findByLabelText("Acme (ACM)");
+    for (const [status, label] of [
+      ["backlog", "Backlog"],
+      ["todo", "Todo"],
+      ["in_progress", "In Progress"],
+      ["in_review", "In Review"],
+      ["done", "Done"],
+    ] as const) {
+      const column = screen.getByTestId(`global-kanban-column-${status}`);
+      expect(within(column).getByText(label)).toBeInTheDocument();
     }
-    expect(screen.queryByText("Blocked")).not.toBeInTheDocument();
+    expect(
+      screen.queryByTestId("global-kanban-column-blocked"),
+    ).not.toBeInTheDocument();
 
     expect(await screen.findByLabelText("Acme (ACM)")).toBeInTheDocument();
     expect(await screen.findByLabelText("Beta (BET)")).toBeInTheDocument();
@@ -225,7 +259,7 @@ describe("GlobalKanban", () => {
     expect(replace).toHaveBeenCalledWith("/global?workspace_ids=ws-1");
   });
 
-  it("hides the filter bar entirely when the user only belongs to one workspace", () => {
+  it("hides the workspace filter row when the user only belongs to one workspace", () => {
     listCrossWorkspaceIssues.mockImplementation(() => new Promise(() => {}));
     renderKanban({
       workspaces: [makeWorkspace({ id: "ws-only", name: "Solo", slug: "solo" })],
@@ -233,5 +267,40 @@ describe("GlobalKanban", () => {
     expect(
       screen.queryByRole("group", { name: /workspace filter/i }),
     ).toBeNull();
+    // Status filter is always available, even for single-workspace users.
+    expect(
+      screen.getByRole("group", { name: /status filter/i }),
+    ).toBeInTheDocument();
+  });
+
+  it("forwards the URL `status` filter to the cross-workspace API call", async () => {
+    listCrossWorkspaceIssues.mockResolvedValueOnce({
+      issues: [],
+      next_cursor: null,
+      has_more: false,
+      total_returned: 0,
+    });
+    renderKanban({
+      searchParams: new URLSearchParams("status=in_progress,todo"),
+    });
+    expect(
+      await screen.findByText(/no issues match the current filter/i),
+    ).toBeInTheDocument();
+    expect(listCrossWorkspaceIssues).toHaveBeenCalledWith(
+      expect.objectContaining({ status: ["in_progress", "todo"] }),
+    );
+  });
+
+  it("toggling a status chip pushes `status` into the URL via NavigationAdapter.replace", async () => {
+    listCrossWorkspaceIssues.mockResolvedValue({
+      issues: [],
+      next_cursor: null,
+      has_more: false,
+      total_returned: 0,
+    });
+    const { replace } = renderKanban();
+
+    fireEvent.click(screen.getByTestId("status-filter-chip-in_progress"));
+    expect(replace).toHaveBeenCalledWith("/global?status=in_progress");
   });
 });
