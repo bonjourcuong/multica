@@ -232,6 +232,96 @@ func TestBuildPromptCommentTriggeredByMember(t *testing.T) {
 	}
 }
 
+// TestBuildPromptGlobalChat covers the user-level global-chat dispatch path
+// added with the V3 agent picker. The prompt must NOT carry workspace framing
+// (no `multica issue ...` / `multica workspace ...` hint) and must surface the
+// user message verbatim so the agent answers the right thing.
+func TestBuildPromptGlobalChat(t *testing.T) {
+	t.Parallel()
+
+	userMsg := "ls /root/multica and tell me what's in there"
+	prompt := BuildPrompt(Task{
+		GlobalSessionID:   "11111111-2222-3333-4444-555555555555",
+		GlobalChatMessage: userMsg,
+		Agent:             &AgentData{Name: "Claude Code (terminator-9999)"},
+	})
+
+	for _, want := range []string{
+		"global-chat message",
+		"not tied to any Multica workspace or issue",
+		userMsg,
+	} {
+		if !strings.Contains(prompt, want) {
+			t.Fatalf("global-chat prompt missing %q\n---\n%s", want, prompt)
+		}
+	}
+
+	// Workspace-flavored CLI hints must not appear. The prompt is allowed to
+	// MENTION `multica issue ...` / `multica workspace ...` in a "do not run"
+	// directive (and does), so we assert against the start-by-running framing
+	// the workspace path uses, not against the bare command name.
+	for _, absent := range []string{
+		"Start by running `multica issue get",
+		"Your assigned issue ID",
+		"local coding agent for a Multica workspace",
+	} {
+		if strings.Contains(prompt, absent) {
+			t.Fatalf("global-chat prompt must not contain %q (no workspace context)\n---\n%s", absent, prompt)
+		}
+	}
+}
+
+// TestBuildPromptGlobalChatTakesPrecedenceOverChat guards the dispatch order:
+// if a task is ever populated with both a global session and a workspace chat
+// session, the global branch must win because it carries no workspace and the
+// chat branch would emit workspace-flavored framing.
+func TestBuildPromptGlobalChatTakesPrecedenceOverChat(t *testing.T) {
+	t.Parallel()
+
+	prompt := BuildPrompt(Task{
+		GlobalSessionID:   "global-1",
+		ChatSessionID:     "chat-1",
+		GlobalChatMessage: "global hello",
+		ChatMessage:       "workspace hello",
+	})
+	if !strings.Contains(prompt, "global hello") {
+		t.Fatalf("expected global branch to win, got:\n%s", prompt)
+	}
+	if strings.Contains(prompt, "workspace hello") {
+		t.Fatalf("workspace chat message leaked into global prompt:\n%s", prompt)
+	}
+}
+
+// TestBuildPromptGlobalChatDoesNotEchoMcpSecrets is the secret-redaction guard
+// from MUL-138 R5: the global agent's mcp_config carries a Honcho JWT and we
+// must not let that token find its way into the prompt the daemon hands to
+// the CLI (which is logged, broadcast as task messages, and stored). The
+// daemon never reads task.Agent.McpConfig from BuildPrompt, but a future
+// refactor that started inlining auth context would silently leak it; this
+// test fails that change loudly.
+func TestBuildPromptGlobalChatDoesNotEchoMcpSecrets(t *testing.T) {
+	t.Parallel()
+
+	jwt := "eyJhbGciOiJIUzI1NiJ9.eyJ0IjoidGVzdC1zZWNyZXQifQ.signaturepartherelongenough"
+	mcp := json.RawMessage(`{"mcpServers":{"honcho":{"env":{"HONCHO_API_KEY":"` + jwt + `"}}}}`)
+
+	prompt := BuildPrompt(Task{
+		GlobalSessionID:   "global-1",
+		GlobalChatMessage: "what's in /root?",
+		Agent: &AgentData{
+			Name:      "Claude Code (terminator-9999)",
+			McpConfig: mcp,
+		},
+	})
+
+	if strings.Contains(prompt, jwt) {
+		t.Fatalf("honcho JWT must never appear in the rendered prompt\n---\n%s", prompt)
+	}
+	if strings.Contains(prompt, "HONCHO_API_KEY") {
+		t.Fatalf("HONCHO_API_KEY env name must not be inlined in the prompt\n---\n%s", prompt)
+	}
+}
+
 func TestBuildPromptCommentTriggeredNoContent(t *testing.T) {
 	t.Parallel()
 
