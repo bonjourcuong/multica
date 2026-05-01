@@ -42,17 +42,20 @@ function makeMessage(over: Partial<GlobalChatMessage> = {}): GlobalChatMessage {
 
 function makeSendResponse(
   message: GlobalChatMessage,
+  over: Partial<SendGlobalChatMessageResponse> = {},
 ): SendGlobalChatMessageResponse {
-  return { message, dispatch: [], mentions: [] };
+  return { message, dispatch: [], mentions: [], ...over };
 }
 
-function renderPane() {
+function renderPane(
+  props: Parameters<typeof GlobalChatPane>[0] = {},
+) {
   const qc = new QueryClient({
     defaultOptions: { queries: { retry: false }, mutations: { retry: false } },
   });
   return render(
     <QueryClientProvider client={qc}>
-      <GlobalChatPane />
+      <GlobalChatPane {...props} />
     </QueryClientProvider>,
   );
 }
@@ -112,5 +115,50 @@ describe("GlobalChatPane", () => {
     const { findByText } = renderPane();
     expect(await findByText("ping")).toBeInTheDocument();
     expect(await findByText("pong")).toBeInTheDocument();
+  });
+
+  it("invokes lifecycle callbacks around the send mutation", async () => {
+    const dispatch = [
+      {
+        workspace_slug: "ws1",
+        workspace_id: "ws-uuid-1",
+        mirror_session_id: "ses-1",
+        mirror_message_id: "msg-1",
+      },
+    ];
+    sendGlobalChatMessage.mockResolvedValue(
+      makeSendResponse(makeMessage({ body: "@ws1 hi" }), { dispatch }),
+    );
+
+    const onSubmit = vi.fn();
+    const onResolved = vi.fn();
+
+    const { getByTestId } = renderPane({ onSubmit, onResolved });
+    const input = getByTestId("global-chat-input") as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "@ws1 hi" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalledWith("@ws1 hi"));
+    await waitFor(() =>
+      expect(onResolved).toHaveBeenCalledWith(
+        expect.objectContaining({ dispatch }),
+      ),
+    );
+  });
+
+  it("invokes onErrored when the send mutation rejects", async () => {
+    sendGlobalChatMessage.mockRejectedValue(new Error("boom"));
+
+    const onErrored = vi.fn();
+    const { getByTestId } = renderPane({ onErrored });
+    const input = getByTestId("global-chat-input") as HTMLTextAreaElement;
+
+    fireEvent.change(input, { target: { value: "hi" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    await waitFor(() =>
+      expect(onErrored).toHaveBeenCalledWith(expect.any(Error)),
+    );
   });
 });

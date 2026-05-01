@@ -16,9 +16,15 @@ export interface GlobalChatSession {
 export type GlobalChatAuthorKind = "user" | "agent";
 
 export interface GlobalDispatchTarget {
+  workspace_slug: string;
+  /** Empty when the dispatch was rejected before resolution. */
   workspace_id: string;
+  /** Empty when the dispatch was rejected. */
   mirror_session_id: string;
+  /** Empty when the dispatch was rejected. */
   mirror_message_id: string;
+  /** Humanised rejection message. Absent on success. */
+  error?: string;
 }
 
 export interface GlobalChatMessage {

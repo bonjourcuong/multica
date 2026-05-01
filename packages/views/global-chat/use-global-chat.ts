@@ -61,21 +61,42 @@ export function useGlobalMirrors() {
   return useQuery(globalMirrorsOptions());
 }
 
+export interface UseSendGlobalChatMessageOptions {
+  /** Fires before the network request — used to flip tiles to `sending`. */
+  onSubmit?: (body: string) => void;
+  /** Fires on successful POST with the dispatch entries the server returned. */
+  onResolved?: (resp: SendGlobalChatMessageResponse) => void;
+  /** Fires when the POST itself fails (network/5xx) — distinct from a per-target reject. */
+  onErrored?: (err: Error) => void;
+}
+
 /**
  * Sends a user message to the global chat. The mutation invalidates the
  * messages cache on success so the next read refetches the persisted log.
  * Realtime fan-out lands in MUL-31 — until then this works as a polling
  * surface backed by manual invalidations.
+ *
+ * Optional lifecycle callbacks let the caller drive per-target tile state
+ * without the hook owning that concern itself.
  */
-export function useSendGlobalChatMessage() {
+export function useSendGlobalChatMessage(
+  options?: UseSendGlobalChatMessageOptions,
+) {
   const qc = useQueryClient();
   return useMutation<SendGlobalChatMessageResponse, Error, string>({
     mutationFn: (body) => api.sendGlobalChatMessage(body),
+    onMutate: (body) => {
+      options?.onSubmit?.(body);
+    },
     onSuccess: (resp) => {
       qc.setQueryData<GlobalChatMessage[]>(
         globalChatKeys.messages(),
         (prev) => (prev ? [...prev, resp.message] : [resp.message]),
       );
+      options?.onResolved?.(resp);
+    },
+    onError: (err) => {
+      options?.onErrored?.(err);
     },
     // Defense-in-depth: even if the optimistic write above goes stale (e.g.
     // server contract drifts again), invalidating on settle self-heals on the

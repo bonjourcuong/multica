@@ -72,4 +72,22 @@ describe("WorkspaceTilesGrid", () => {
     expect(queryAllByTestId("workspace-tile")).toHaveLength(0);
     expect(getByTestId("tiles-empty")).toBeInTheDocument();
   });
+
+  it("forwards per-workspace dispatch state to each tile", () => {
+    const specs = makeSpecs(3);
+    const { getAllByTestId } = render(
+      <WorkspaceTilesGrid
+        workspaces={specs}
+        tileStates={{
+          "ws-0": "delivered",
+          "ws-2": "not_authorized",
+        }}
+      />,
+    );
+    const tiles = getAllByTestId("workspace-tile");
+    expect(tiles[0]?.dataset.dispatchState).toBe("delivered");
+    // Tile without an entry stays idle (default).
+    expect(tiles[1]?.dataset.dispatchState).toBe("idle");
+    expect(tiles[2]?.dataset.dispatchState).toBe("not_authorized");
+  });
 });

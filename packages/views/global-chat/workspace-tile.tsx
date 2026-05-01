@@ -1,5 +1,6 @@
 "use client";
 
+import type { TileDispatchState } from "@multica/core/global-chat";
 import { workspaceColor } from "@multica/core/workspace/color";
 import { cn } from "@multica/ui/lib/utils";
 import { useWorkspaceMirror } from "./use-workspace-mirror";
@@ -20,6 +21,8 @@ export interface WorkspaceTileSpec {
 
 export interface WorkspaceTileProps {
   workspace: WorkspaceTileSpec;
+  /** Per-target dispatch state for the most recent global-chat submission. */
+  dispatchState?: TileDispatchState;
 }
 
 /**
@@ -28,7 +31,10 @@ export interface WorkspaceTileProps {
  * for not mounting more tiles than the realtime hub can comfortably fan
  * out to (see ADR D7 — the cap lives in the grid, not here).
  */
-export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
+export function WorkspaceTile({
+  workspace,
+  dispatchState = "idle",
+}: WorkspaceTileProps) {
   const { messages } = useWorkspaceMirror(workspace.mirror_session_id);
   const initials = workspace.workspace_name.slice(0, 2).toUpperCase();
   const swatch = workspaceColor(workspace.workspace_id);
@@ -36,6 +42,8 @@ export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
   return (
     <article
       data-testid="workspace-tile"
+      data-workspace-slug={workspace.workspace_slug}
+      data-dispatch-state={dispatchState}
       className="flex min-h-0 flex-col overflow-hidden rounded-md border bg-card text-card-foreground"
       aria-label={`${workspace.workspace_name} mirror`}
     >
@@ -55,6 +63,7 @@ export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
             @{workspace.workspace_slug}
           </div>
         </div>
+        <DispatchStateBadge state={dispatchState} />
       </header>
       <ol className="flex-1 space-y-1 overflow-y-auto p-2 text-xs">
         {messages.length === 0 ? (
@@ -81,5 +90,49 @@ export function WorkspaceTile({ workspace }: WorkspaceTileProps) {
         )}
       </ol>
     </article>
+  );
+}
+
+interface DispatchStateBadgeProps {
+  state: TileDispatchState;
+}
+
+const BADGE_LABELS: Record<TileDispatchState, string> = {
+  idle: "",
+  sending: "Sending…",
+  delivered: "Delivered",
+  not_authorized: "No access",
+  error: "Failed",
+};
+
+/**
+ * Status badge in the tile header. Idle is intentionally invisible — we
+ * do not want to crowd the chrome of every workspace tile when no dispatch
+ * is in flight. ADR D6: tokens only, no new visual identity.
+ */
+function DispatchStateBadge({ state }: DispatchStateBadgeProps) {
+  if (state === "idle") return null;
+
+  const label = BADGE_LABELS[state];
+
+  return (
+    <span
+      data-testid="tile-dispatch-state"
+      data-state={state}
+      role="status"
+      aria-label={`Dispatch ${label}`}
+      className={cn(
+        "inline-flex shrink-0 items-center rounded-full border px-2 py-0.5 text-[10px] font-medium leading-none",
+        state === "sending" &&
+          "border-border bg-muted text-muted-foreground animate-pulse",
+        state === "delivered" && "border-success/40 bg-success/10 text-success",
+        state === "not_authorized" &&
+          "border-warning/40 bg-warning/10 text-warning",
+        state === "error" &&
+          "border-destructive/40 bg-destructive/10 text-destructive",
+      )}
+    >
+      {label}
+    </span>
   );
 }

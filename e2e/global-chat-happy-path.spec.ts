@@ -3,17 +3,18 @@
  *
  * Mirrors the spec section 8 of the design doc:
  *   1. From `/global/chat`, post `@<workspace> ping de test`.
- *   2. Within 5s the corresponding workspace tile (right pane) reflects the
- *      message — i.e. the dispatch produced a mirror chat_message that the
- *      tile's WS subscription picked up.
- *   3. Navigating into the workspace surface still shows the message in the
- *      mirror chat_session, end-to-end persistence confirmed via the API.
+ *   2. Within 5s the corresponding workspace tile (right pane) flips to the
+ *      `delivered` dispatch state — the contract that the user can actually
+ *      see in the UI (MUL-99).
+ *   3. The mirror chat_message lands in the target workspace, end-to-end
+ *      persistence confirmed via direct DB read.
  *
  * The tile grid is driven by `GET /api/global/chat/mirrors` (MUL-100). The
- * spec asserts the contract directly: after dispatch the endpoint returns
- * a non-null mirror_session_id and a fresh last_message_at for the target
- * workspace. The DB-side assertion on `chat_message` insertion is kept as
- * a defense-in-depth check that the dispatch wrote-through.
+ * dispatch-state badge (MUL-99) is the V1.1 UI surface the spec drives;
+ * the mirrors endpoint contract is asserted alongside as a redundancy that
+ * the tile data is fresh after dispatch. The DB-side assertion on
+ * `chat_message` insertion is kept as a defense-in-depth check that the
+ * dispatch wrote through.
  */
 
 import { test, expect } from "@playwright/test";
@@ -76,54 +77,30 @@ test.describe("Global chat — happy path", () => {
     const marker = `E2E-HAPPY-${Date.now()}`;
     const body = `@${TARGET_WORKSPACE_SLUG} ping de test ${marker}`;
 
-    // Capture the POST response so we can assert the dispatch outcome
-    // without coupling to the in-DOM rendering of dispatch state (the pane
-    // currently only renders the persisted user message, not the
-    // per-target dispatch tile — see global-chat-pane.tsx).
-    const postPromise = page.waitForResponse(
-      (resp) =>
-        resp.url().includes("/api/global/chat/sessions/me/messages") &&
-        resp.request().method() === "POST",
-      { timeout: 10000 },
-    );
-
     await input.fill(body);
     await page.getByRole("button", { name: "Send message" }).click();
 
-    const post = await postPromise;
-    expect(post.status()).toBe(201);
-    const payload = (await post.json()) as {
-      message: { body: string };
-      dispatch: {
-        workspace_slug: string;
-        workspace_id?: string;
-        mirror_session_id?: string;
-        mirror_message_id?: string;
-        error?: string;
-      }[];
-      mentions: { workspace_slug: string }[];
-    };
-
-    expect(payload.message.body).toBe(body);
-    expect(payload.mentions).toEqual([{ workspace_slug: TARGET_WORKSPACE_SLUG }]);
-    expect(payload.dispatch).toHaveLength(1);
-    expect(payload.dispatch[0]?.error).toBeUndefined();
-    expect(payload.dispatch[0]?.workspace_id).toBeTruthy();
-    expect(payload.dispatch[0]?.mirror_session_id).toBeTruthy();
-    expect(payload.dispatch[0]?.mirror_message_id).toBeTruthy();
-
     // The user message should land in the chat log (optimistic write +
     // server confirm). Scoped to the messages list so we don't accidentally
-    // match the input field or the placeholder description.
+    // match the input field or the placeholder description. Kept as the
+    // redundancy assertion alongside the tile-state contract below.
     await expect(
       page.getByTestId("global-chat-messages").getByText(body),
     ).toBeVisible({ timeout: 5000 });
 
-    // The corresponding workspace tile must be mounted (i.e. the user is a
-    // member and the grid renders within the cap).
-    await expect(
-      page.getByRole("article", { name: /e2e workspace mirror/i }),
-    ).toBeVisible({ timeout: 5000 });
+    // V1.1 contract (MUL-99): the corresponding workspace tile flips to
+    // `delivered` when the dispatch resolves. The tile is keyed by slug
+    // via a data attribute so the assertion is robust to display-name
+    // changes on the workspace.
+    const targetTile = page.locator(
+      `[data-testid="workspace-tile"][data-workspace-slug="${TARGET_WORKSPACE_SLUG}"]`,
+    );
+    await expect(targetTile).toBeVisible({ timeout: 5000 });
+    await expect(targetTile).toHaveAttribute(
+      "data-dispatch-state",
+      "delivered",
+      { timeout: 5000 },
+    );
 
     // End-to-end persistence: a global_mirror chat_message was inserted in
     // the target workspace within 5s of the dispatch. This is the
