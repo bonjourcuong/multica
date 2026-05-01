@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"testing"
 
@@ -16,10 +17,12 @@ import (
 // --- in-memory fakes -----------------------------------------------------
 
 type fakeGlobalChat struct {
-	users       map[string]db.User
-	sessions    map[string]db.GlobalChatSession // key = userUUID
-	agents      map[string]db.Agent             // key = userUUID
-	messages    []db.GlobalChatMessage
+	users        map[string]db.User
+	sessions     map[string]db.GlobalChatSession // key = userUUID
+	agents       map[string]db.Agent             // key = userUUID — kept for legacy single-agent semantics
+	agentList    []db.Agent                      // multi-agent storage for V3 (twin + Claude Code + ...)
+	messages     []db.GlobalChatMessage
+	runtimes     map[string]db.AgentRuntime // key = uuidValue(owner_id) + "::" + name
 	createParams []db.CreateGlobalAgentParams
 }
 
@@ -28,7 +31,12 @@ func newFakeGlobalChat() *fakeGlobalChat {
 		users:    map[string]db.User{},
 		sessions: map[string]db.GlobalChatSession{},
 		agents:   map[string]db.Agent{},
+		runtimes: map[string]db.AgentRuntime{},
 	}
+}
+
+func runtimeKey(ownerID pgtype.UUID, name string) string {
+	return uuidValue(ownerID) + "::" + name
 }
 
 func (f *fakeGlobalChat) GetGlobalChatSessionByUser(ctx context.Context, userID pgtype.UUID) (db.GlobalChatSession, error) {
@@ -73,22 +81,63 @@ func (f *fakeGlobalChat) InsertGlobalChatMessage(ctx context.Context, arg db.Ins
 }
 
 func (f *fakeGlobalChat) GetGlobalAgentByUser(ctx context.Context, userID pgtype.UUID) (db.Agent, error) {
+	// Production query is ORDER BY created_at ASC; the agentList slice
+	// preserves insertion order so the first match is the oldest agent —
+	// matches the V1 semantic the tests assert against.
+	for _, a := range f.agentList {
+		if a.UserID == userID && a.Scope == "global" {
+			return a, nil
+		}
+	}
 	if a, ok := f.agents[uuidValue(userID)]; ok {
 		return a, nil
 	}
 	return db.Agent{}, pgx.ErrNoRows
 }
 
+func (f *fakeGlobalChat) GetGlobalAgentByUserAndName(ctx context.Context, arg db.GetGlobalAgentByUserAndNameParams) (db.Agent, error) {
+	for _, a := range f.agentList {
+		if a.UserID == arg.UserID && a.Scope == "global" && a.Name == arg.Name {
+			return a, nil
+		}
+	}
+	return db.Agent{}, pgx.ErrNoRows
+}
+
+func (f *fakeGlobalChat) ListGlobalAgentsByUser(ctx context.Context, userID pgtype.UUID) ([]db.Agent, error) {
+	out := []db.Agent{}
+	for _, a := range f.agentList {
+		if a.UserID == userID && a.Scope == "global" && !a.ArchivedAt.Valid {
+			out = append(out, a)
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeGlobalChat) CreateGlobalAgent(ctx context.Context, arg db.CreateGlobalAgentParams) (db.Agent, error) {
 	f.createParams = append(f.createParams, arg)
 	a := db.Agent{
-		ID:     mustNewUUID(),
-		UserID: arg.UserID,
-		Scope:  "global",
-		Name:   arg.Name,
+		ID:        mustNewUUID(),
+		UserID:    arg.UserID,
+		Scope:     "global",
+		Name:      arg.Name,
+		RuntimeID: arg.RuntimeID,
 	}
-	f.agents[uuidValue(arg.UserID)] = a
+	// First insert per user populates the legacy single-slot map so old
+	// tests that only check `agents` still pass; subsequent inserts
+	// (V3 — Claude Code agent) only land in agentList.
+	if _, exists := f.agents[uuidValue(arg.UserID)]; !exists {
+		f.agents[uuidValue(arg.UserID)] = a
+	}
+	f.agentList = append(f.agentList, a)
 	return a, nil
+}
+
+func (f *fakeGlobalChat) GetAgentRuntimeByOwnerAndName(ctx context.Context, arg db.GetAgentRuntimeByOwnerAndNameParams) (db.AgentRuntime, error) {
+	if rt, ok := f.runtimes[runtimeKey(arg.OwnerID, arg.Name)]; ok {
+		return rt, nil
+	}
+	return db.AgentRuntime{}, pgx.ErrNoRows
 }
 
 func (f *fakeGlobalChat) GetUser(ctx context.Context, id pgtype.UUID) (db.User, error) {
@@ -96,6 +145,19 @@ func (f *fakeGlobalChat) GetUser(ctx context.Context, id pgtype.UUID) (db.User, 
 		return u, nil
 	}
 	return db.User{}, pgx.ErrNoRows
+}
+
+// seedClaudeRuntime registers a `Claude (terminator-9999)` runtime owned
+// by `user` so EnsureClaudeCodeGlobalAgent can succeed in tests.
+func (f *fakeGlobalChat) seedClaudeRuntime(user pgtype.UUID) db.AgentRuntime {
+	rt := db.AgentRuntime{
+		ID:          mustNewUUID(),
+		Name:        ClaudeCodeGlobalRuntimeName,
+		OwnerID:     user,
+		RuntimeMode: "local",
+	}
+	f.runtimes[runtimeKey(user, ClaudeCodeGlobalRuntimeName)] = rt
+	return rt
 }
 
 type capturingBus struct {
@@ -209,6 +271,187 @@ func TestParseMentions_ProxiesMentionPackage(t *testing.T) {
 	}
 	if got[0].WorkspaceSlug != "one" || got[1].AgentName != "Tony" {
 		t.Errorf("unexpected: %+v", got)
+	}
+}
+
+// --- V3 (MUL-137) — agent picker bootstrap & validation -------------------
+
+func TestEnsureClaudeCodeGlobalAgent_CreatesWhenMissing(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	rt := f.seedClaudeRuntime(user)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	agent, err := svc.EnsureClaudeCodeGlobalAgent(ctx, user)
+	if err != nil {
+		t.Fatalf("EnsureClaudeCodeGlobalAgent: %v", err)
+	}
+	if agent.Name != ClaudeCodeGlobalAgentName {
+		t.Errorf("name = %q, want %q", agent.Name, ClaudeCodeGlobalAgentName)
+	}
+	if agent.RuntimeID != rt.ID {
+		t.Errorf("runtime_id mismatch: got %v, want %v", agent.RuntimeID, rt.ID)
+	}
+	if len(f.createParams) != 1 {
+		t.Fatalf("expected 1 CreateGlobalAgent call, got %d", len(f.createParams))
+	}
+	got := f.createParams[0]
+	if got.Instructions != "" {
+		t.Errorf("instructions must be empty; got %q", got.Instructions)
+	}
+	if string(got.RuntimeConfig) != claudeCodeGlobalAgentRuntimeConfig {
+		t.Errorf("runtime_config = %s, want %s", got.RuntimeConfig, claudeCodeGlobalAgentRuntimeConfig)
+	}
+	if string(got.CustomEnv) != "{}" || string(got.CustomArgs) != "[]" {
+		t.Errorf("custom_env/custom_args must be empty defaults; got env=%s args=%s", got.CustomEnv, got.CustomArgs)
+	}
+	if got.Visibility != "private" {
+		t.Errorf("visibility = %q, want private", got.Visibility)
+	}
+	if got.MaxConcurrentTasks != 1 {
+		t.Errorf("max_concurrent_tasks = %d, want 1", got.MaxConcurrentTasks)
+	}
+}
+
+func TestEnsureClaudeCodeGlobalAgent_Idempotent(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	f.seedClaudeRuntime(user)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	first, err := svc.EnsureClaudeCodeGlobalAgent(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := svc.EnsureClaudeCodeGlobalAgent(ctx, user)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.ID != second.ID {
+		t.Errorf("expected idempotent EnsureClaudeCodeGlobalAgent, got distinct IDs")
+	}
+	if len(f.createParams) != 1 {
+		t.Errorf("expected one CreateGlobalAgent across two Ensure calls, got %d", len(f.createParams))
+	}
+}
+
+func TestEnsureClaudeCodeGlobalAgent_RuntimeMissing(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	// Intentionally NO runtime seeded.
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	_, err := svc.EnsureClaudeCodeGlobalAgent(ctx, user)
+	if !errors.Is(err, ErrClaudeCodeRuntimeMissing) {
+		t.Fatalf("expected ErrClaudeCodeRuntimeMissing, got %v", err)
+	}
+	if len(f.createParams) != 0 {
+		t.Fatalf("expected no agent created when runtime missing, got %d", len(f.createParams))
+	}
+}
+
+func TestEnsureSession_BootstrapsBothAgentsWhenRuntimeKnown(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	f.seedClaudeRuntime(user)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, user); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+	agents, _ := svc.ListGlobalAgents(ctx, user)
+	if len(agents) != 2 {
+		t.Fatalf("expected 2 global agents (twin + claude code), got %d", len(agents))
+	}
+	gotNames := map[string]bool{agents[0].Name: true, agents[1].Name: true}
+	// Twin name has the user-suffixed shape "Cuong Pho (Cuong)"; just
+	// assert both intended agents are present (twin via prefix match,
+	// Claude Code by exact name).
+	hasTwin := false
+	for n := range gotNames {
+		if strings.HasPrefix(n, GlobalAgentName) {
+			hasTwin = true
+		}
+	}
+	if !hasTwin {
+		t.Errorf("twin missing; got names %v", gotNames)
+	}
+	if !gotNames[ClaudeCodeGlobalAgentName] {
+		t.Errorf("claude code agent missing; got names %v", gotNames)
+	}
+}
+
+func TestEnsureSession_TwinOnlyWhenRuntimeMissing(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	// No runtime: Claude Code bootstrap is best-effort and must not block
+	// the twin or the session creation.
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, user); err != nil {
+		t.Fatalf("EnsureSession should succeed when runtime is missing: %v", err)
+	}
+	agents, _ := svc.ListGlobalAgents(ctx, user)
+	if len(agents) != 1 {
+		t.Fatalf("expected only the twin when runtime missing, got %d agents", len(agents))
+	}
+}
+
+func TestGetGlobalAgentForUser_ReturnsOwnedAgent(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	f.seedClaudeRuntime(user)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	agents, _ := svc.ListGlobalAgents(ctx, user)
+	if len(agents) == 0 {
+		t.Fatal("seed failed: no agents")
+	}
+	got, err := svc.GetGlobalAgentForUser(ctx, user, agents[0].ID)
+	if err != nil {
+		t.Fatalf("GetGlobalAgentForUser: %v", err)
+	}
+	if got.ID != agents[0].ID {
+		t.Errorf("returned wrong agent")
+	}
+}
+
+func TestGetGlobalAgentForUser_RejectsCrossUserAgent(t *testing.T) {
+	ctx := context.Background()
+	owner := mustNewUUID()
+	stranger := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(owner)] = db.User{ID: owner, Name: "Cuong"}
+	f.users[uuidValue(stranger)] = db.User{ID: stranger, Name: "Stranger"}
+	f.seedClaudeRuntime(owner)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	ownerAgents, _ := svc.ListGlobalAgents(ctx, owner)
+	if len(ownerAgents) == 0 {
+		t.Fatal("seed failed")
+	}
+	// Stranger asks about owner's agent -> not found.
+	_, err := svc.GetGlobalAgentForUser(ctx, stranger, ownerAgents[0].ID)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("expected pgx.ErrNoRows for cross-user lookup, got %v", err)
 	}
 }
 

@@ -44,10 +44,16 @@ type GlobalChatMessageResponse struct {
 // Includes the persisted message and the per-target dispatch outcome so the
 // pane can render delivery state immediately, without waiting on the
 // realtime event.
+//
+// TaskID and AgentID are populated only when the request carried an
+// optional `agent_id` (V3 picker — MUL-137); they let the FE render a
+// "agent is typing" indicator until the daemon completes the task.
 type GlobalChatPostResponse struct {
-	Message  GlobalChatMessageResponse              `json:"message"`
-	Dispatch []protocol.GlobalChatDispatchTarget    `json:"dispatch"`
-	Mentions []GlobalChatMentionEcho                `json:"mentions"`
+	Message  GlobalChatMessageResponse           `json:"message"`
+	Dispatch []protocol.GlobalChatDispatchTarget `json:"dispatch"`
+	Mentions []GlobalChatMentionEcho             `json:"mentions"`
+	TaskID   string                              `json:"task_id,omitempty"`
+	AgentID  string                              `json:"agent_id,omitempty"`
 }
 
 // GlobalMirrorSummaryResponse is one row of GET /api/global/chat/mirrors.
@@ -167,6 +173,13 @@ func (h *Handler) ListGlobalMessages(w http.ResponseWriter, r *http.Request) {
 // PostGlobalMessage is POST /api/global/chat/sessions/me/messages. Persists
 // the user message, fans out to each `@workspace[:agent]` mention, and
 // returns the persisted message + per-target dispatch outcome.
+//
+// V3 (MUL-137) added an optional `agent_id` to the request body: when
+// present, the message is also enqueued as a global chat task targeted
+// at that agent so a runtime authors the reply (the existing V1 mention
+// fan-out continues to run independently). Missing `agent_id` keeps the
+// V1 path unchanged — the FE picker just doesn't send it on first load,
+// and old clients are unaffected.
 func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -174,7 +187,8 @@ func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Body string `json:"body"`
+		Body    string `json:"body"`
+		AgentID string `json:"agent_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
@@ -186,6 +200,38 @@ func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 	}
 
 	user := parseUUID(userID)
+
+	// Validate the optional agent_id BEFORE persisting / fanning out.
+	// Failing late (after the user message lands) would create a "ghost
+	// turn" with no reply and complicate retry semantics on the FE.
+	var pickedAgent *db.Agent
+	if req.AgentID != "" {
+		agentUUID := parseUUID(req.AgentID)
+		if !agentUUID.Valid {
+			writeError(w, http.StatusBadRequest, "invalid agent_id")
+			return
+		}
+		agent, err := h.GlobalChat.GetGlobalAgentForUser(r.Context(), user, agentUUID)
+		if err != nil {
+			if isNotFound(err) {
+				// Collapse "doesn't exist" + "exists but workspace agent"
+				// + "exists but other user" into 404 — picker probing
+				// must not enumerate cross-user agent IDs.
+				writeError(w, http.StatusNotFound, "agent not found")
+				return
+			}
+			slog.Error("post global message: agent lookup failed",
+				"user_id", userID, "agent_id", req.AgentID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to load agent")
+			return
+		}
+		if agent.ArchivedAt.Valid {
+			writeError(w, http.StatusUnprocessableEntity, "agent is archived")
+			return
+		}
+		pickedAgent = &agent
+	}
+
 	msg, err := h.GlobalChat.PostUserMessage(r.Context(), user, req.Body)
 	if err != nil {
 		slog.Error("post global message failed", "user_id", userID, "error", err)
@@ -231,11 +277,59 @@ func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 		h.GlobalChat.PublishDispatched(user, msg.ID, dispatch)
 	}
 
-	writeJSON(w, http.StatusCreated, GlobalChatPostResponse{
+	// V3 picker: enqueue the agent task LAST so a runtime/queue failure
+	// doesn't roll back the user's message or the mention fan-out (both
+	// of which already succeeded). The frontend gets task_id back so it
+	// can show a pending indicator while the daemon picks up the task.
+	resp := GlobalChatPostResponse{
 		Message:  globalMessageToResponse(msg),
 		Dispatch: dispatch,
 		Mentions: echoes,
-	})
+	}
+	if pickedAgent != nil {
+		sess, err := h.GlobalChat.GetSession(r.Context(), user)
+		if err != nil {
+			slog.Error("post global message: load session for task failed",
+				"user_id", userID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to enqueue agent task")
+			return
+		}
+		task, err := h.TaskService.EnqueueGlobalChatTask(r.Context(), sess, pickedAgent.ID)
+		if err != nil {
+			slog.Error("post global message: enqueue task failed",
+				"user_id", userID, "agent_id", req.AgentID, "error", err)
+			writeError(w, http.StatusInternalServerError, "failed to enqueue agent task: "+err.Error())
+			return
+		}
+		resp.TaskID = uuidToString(task.ID)
+		resp.AgentID = uuidToString(pickedAgent.ID)
+	}
+
+	writeJSON(w, http.StatusCreated, resp)
+}
+
+// ListGlobalChatAgents is GET /api/global/chat/agents. Returns every
+// non-archived global agent owned by the caller, in the same shape the
+// FE already consumes for `/api/agents`. No workspace middleware: the
+// router mounts this in the user-scoped group, and ListGlobalAgents
+// scopes to user_id at the SQL layer so a probing caller can't see
+// another user's global agents.
+func (h *Handler) ListGlobalChatAgents(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	rows, err := h.GlobalChat.ListGlobalAgents(r.Context(), parseUUID(userID))
+	if err != nil {
+		slog.Error("list global chat agents failed", "user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to list global chat agents")
+		return
+	}
+	resp := make([]AgentResponse, 0, len(rows))
+	for _, a := range rows {
+		resp = append(resp, agentToResponse(a))
+	}
+	writeJSON(w, http.StatusOK, resp)
 }
 
 // CrossWorkspaceQueryRequest is the body of POST /api/global/chat/cross-ws-query

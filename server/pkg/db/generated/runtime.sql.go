@@ -84,7 +84,7 @@ WHERE status IN ('dispatched', 'running')
   AND runtime_id IN (
     SELECT id FROM agent_runtime WHERE status = 'offline'
   )
-RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, last_heartbeat_at
+RETURNING id, agent_id, issue_id, status, priority, dispatched_at, started_at, completed_at, result, error, created_at, context, runtime_id, session_id, work_dir, trigger_comment_id, chat_session_id, autopilot_run_id, attempt, max_attempts, parent_task_id, failure_reason, last_heartbeat_at, global_session_id
 `
 
 // Marks dispatched/running tasks as failed when their runtime is offline.
@@ -122,6 +122,7 @@ func (q *Queries) FailTasksForOfflineRuntimes(ctx context.Context) ([]AgentTaskQ
 			&i.ParentTaskID,
 			&i.FailureReason,
 			&i.LastHeartbeatAt,
+			&i.GlobalSessionID,
 		); err != nil {
 			return nil, err
 		}
@@ -203,6 +204,46 @@ WHERE id = $1
 
 func (q *Queries) GetAgentRuntime(ctx context.Context, id pgtype.UUID) (AgentRuntime, error) {
 	row := q.db.QueryRow(ctx, getAgentRuntime, id)
+	var i AgentRuntime
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.DaemonID,
+		&i.Name,
+		&i.RuntimeMode,
+		&i.Provider,
+		&i.Status,
+		&i.DeviceInfo,
+		&i.Metadata,
+		&i.LastSeenAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.OwnerID,
+		&i.LegacyDaemonID,
+	)
+	return i, err
+}
+
+const getAgentRuntimeByOwnerAndName = `-- name: GetAgentRuntimeByOwnerAndName :one
+SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
+WHERE owner_id = $1 AND name = $2
+ORDER BY created_at ASC
+LIMIT 1
+`
+
+type GetAgentRuntimeByOwnerAndNameParams struct {
+	OwnerID pgtype.UUID `json:"owner_id"`
+	Name    string      `json:"name"`
+}
+
+// Resolves a runtime by (owner_id, name) without scoping to a workspace.
+// Used by EnsureClaudeCodeGlobalAgent to bind the per-user global agent
+// to the same `Claude (terminator-9999)` runtime the user already runs
+// Marvel agents on. Returns the oldest match so a re-registered runtime
+// (which mints a fresh row) doesn't shadow the canonical one until the
+// old offline row is reaped.
+func (q *Queries) GetAgentRuntimeByOwnerAndName(ctx context.Context, arg GetAgentRuntimeByOwnerAndNameParams) (AgentRuntime, error) {
+	row := q.db.QueryRow(ctx, getAgentRuntimeByOwnerAndName, arg.OwnerID, arg.Name)
 	var i AgentRuntime
 	err := row.Scan(
 		&i.ID,

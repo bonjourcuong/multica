@@ -91,6 +91,17 @@ INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, 
 VALUES ($1, $2, NULL, 'queued', $3, $4)
 RETURNING *;
 
+-- name: CreateGlobalChatTask :one
+-- Mirrors CreateChatTask but targets a global_chat_session instead of
+-- a workspace chat_session. Both columns are mutually exclusive on a
+-- single row by service-layer convention (a task either runs in a
+-- workspace chat or in the global lane, never both); ClaimAgentTask
+-- already ignores global_session_id, which is fine — the per-(agent,
+-- chat_session) serialization rule still holds via the agent itself.
+INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority, global_session_id)
+VALUES ($1, $2, NULL, 'queued', $3, $4)
+RETURNING *;
+
 -- name: GetLastChatTaskSession :one
 -- Returns the most recent task in this chat session that managed to record a
 -- session_id. Includes both completed and failed tasks: even a failed task

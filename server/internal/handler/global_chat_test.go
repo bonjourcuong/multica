@@ -1,15 +1,19 @@
 package handler
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/multica-ai/multica/server/internal/service"
 )
 
 // mirrorsFixture seeds three workspaces around the default test user:
@@ -160,6 +164,326 @@ func setupMirrorsFixture(t *testing.T, pool *pgxpool.Pool, userID, ownerWorkspac
 		pool.Exec(bg, `DELETE FROM chat_session WHERE workspace_id = $1 AND scope = 'global_mirror'`, ownerWorkspaceID)
 	})
 	return f
+}
+
+// --- V3 (MUL-137) — agent picker handler tests ----------------------------
+
+// globalAgentsFixture seeds a `Claude (terminator-9999)` runtime owned by
+// the test user (no workspace_id binding for our purposes — agent_runtime
+// requires workspace_id, so we reuse the test workspace), then bootstraps
+// the user's global session which in turn provisions both the legacy
+// twin and the V3 Claude Code global agent. Returns the IDs the calling
+// test cares about.
+type globalAgentsFixture struct {
+	TwinAgentID       string
+	ClaudeCodeAgentID string
+	GlobalSessionID   string
+}
+
+func setupGlobalAgentsFixture(t *testing.T, pool *pgxpool.Pool, userID string) *globalAgentsFixture {
+	t.Helper()
+	ctx := context.Background()
+
+	// Provision the runtime the bootstrap needs. agent_runtime requires
+	// a workspace_id; we attach to the test workspace because runtime
+	// lookups for global agents only key on (owner_id, name).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status,
+			device_info, metadata, owner_id, last_seen_at
+		)
+		VALUES ($1, NULL, $2, 'local', 'global_test', 'online',
+			'Global test runtime', '{}'::jsonb, $3, now())
+		ON CONFLICT DO NOTHING
+	`, testWorkspaceID, service.ClaudeCodeGlobalRuntimeName, userID); err != nil {
+		t.Fatalf("create claude runtime: %v", err)
+	}
+
+	// Bootstrapping the global session is the canonical path that
+	// provisions both global agents.
+	sess, err := testHandler.GlobalChat.EnsureSession(ctx,
+		parseUUID(userID))
+	if err != nil {
+		t.Fatalf("ensure session: %v", err)
+	}
+
+	agents, err := testHandler.GlobalChat.ListGlobalAgents(ctx, parseUUID(userID))
+	if err != nil {
+		t.Fatalf("list global agents: %v", err)
+	}
+	f := &globalAgentsFixture{GlobalSessionID: uuidToString(sess.ID)}
+	for _, a := range agents {
+		switch a.Name {
+		case service.ClaudeCodeGlobalAgentName:
+			f.ClaudeCodeAgentID = uuidToString(a.ID)
+		default:
+			f.TwinAgentID = uuidToString(a.ID)
+		}
+	}
+
+	t.Cleanup(func() {
+		bg := context.Background()
+		// Drop any tasks the test enqueued before the global session
+		// (FK ON DELETE CASCADE on global_session_id handles its own,
+		// but tasks pointing at workspace agents need explicit cleanup).
+		pool.Exec(bg, `DELETE FROM agent_task_queue WHERE global_session_id = $1`, sess.ID)
+		pool.Exec(bg, `DELETE FROM global_chat_session WHERE user_id = $1`, userID)
+		pool.Exec(bg, `DELETE FROM agent WHERE scope = 'global' AND user_id = $1`, userID)
+		pool.Exec(bg, `DELETE FROM agent_runtime WHERE owner_id = $1 AND name = $2`,
+			userID, service.ClaudeCodeGlobalRuntimeName)
+	})
+	return f
+}
+
+func TestListGlobalChatAgents_Unauthenticated(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/global/chat/agents", nil)
+	testHandler.ListGlobalChatAgents(w, req)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("expected 401, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListGlobalChatAgents_ReturnsBothAgents(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("GET", "/api/global/chat/agents", nil)
+	testHandler.ListGlobalChatAgents(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var rows []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, w.Body.String())
+	}
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 agents (twin + claude code), got %d: %s", len(rows), w.Body.String())
+	}
+	seenTwin := false
+	seenClaude := false
+	for _, r := range rows {
+		id, _ := r["id"].(string)
+		switch id {
+		case f.TwinAgentID:
+			seenTwin = true
+		case f.ClaudeCodeAgentID:
+			seenClaude = true
+			if got, _ := r["name"].(string); got != service.ClaudeCodeGlobalAgentName {
+				t.Errorf("claude agent name = %q, want %q", got, service.ClaudeCodeGlobalAgentName)
+			}
+		}
+	}
+	if !seenTwin {
+		t.Errorf("twin agent missing from response: %s", w.Body.String())
+	}
+	if !seenClaude {
+		t.Errorf("claude code agent missing from response: %s", w.Body.String())
+	}
+}
+
+func TestListGlobalChatAgents_IsolatesByUser(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	// A second user with no global agents must see an empty list, not
+	// the test user's agents.
+	ctx := context.Background()
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	var strangerID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email) VALUES ($1, $2) RETURNING id
+	`, "Global Stranger "+uniq, "global-stranger-"+uniq+"@multica.ai").Scan(&strangerID); err != nil {
+		t.Fatalf("create stranger user: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, strangerID)
+	})
+
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("GET", "/api/global/chat/agents", nil)
+	req.Header.Set("X-User-ID", strangerID)
+	testHandler.ListGlobalChatAgents(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var rows []map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &rows); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("stranger should see no global agents, got %d: %s", len(rows), w.Body.String())
+	}
+}
+
+func TestPostGlobalMessage_NoAgentIdFallsThroughToV1(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages", map[string]any{
+		"body": "hello no agent",
+	})
+	testHandler.PostGlobalMessage(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if v, ok := resp["task_id"].(string); ok && v != "" {
+		t.Fatalf("expected no task_id in V1 fallback, got %q", v)
+	}
+	// No row should be enqueued.
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM agent_task_queue WHERE global_session_id IS NOT NULL`,
+	).Scan(&n); err != nil {
+		t.Fatalf("count tasks: %v", err)
+	}
+	if n != 0 {
+		t.Fatalf("expected 0 global chat tasks enqueued, got %d", n)
+	}
+}
+
+func TestPostGlobalMessage_WithAgentIdEnqueuesTask(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages", map[string]any{
+		"body":     "hello claude",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	testHandler.PostGlobalMessage(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	taskID, _ := resp["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("expected non-empty task_id, got %s", w.Body.String())
+	}
+	if got, _ := resp["agent_id"].(string); got != f.ClaudeCodeAgentID {
+		t.Fatalf("agent_id mismatch: got %q want %q", got, f.ClaudeCodeAgentID)
+	}
+
+	// Verify the task row points at the right session + agent.
+	var globalSessionID, agentID string
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT global_session_id::text, agent_id::text FROM agent_task_queue WHERE id = $1`,
+		taskID,
+	).Scan(&globalSessionID, &agentID); err != nil {
+		t.Fatalf("load task row: %v", err)
+	}
+	if globalSessionID != f.GlobalSessionID {
+		t.Errorf("global_session_id = %s, want %s", globalSessionID, f.GlobalSessionID)
+	}
+	if agentID != f.ClaudeCodeAgentID {
+		t.Errorf("agent_id = %s, want %s", agentID, f.ClaudeCodeAgentID)
+	}
+}
+
+func TestPostGlobalMessage_RejectsCrossUserAgent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	// Stranger tries to use the test user's global agent.
+	ctx := context.Background()
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	var strangerID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email) VALUES ($1, $2) RETURNING id
+	`, "Cross Stranger "+uniq, "cross-stranger-"+uniq+"@multica.ai").Scan(&strangerID); err != nil {
+		t.Fatalf("create stranger: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, strangerID)
+	})
+
+	w := httptest.NewRecorder()
+	body := bytesBuffer(map[string]any{
+		"body":     "hi",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	req := httptest.NewRequest("POST", "/api/global/chat/sessions/me/messages", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", strangerID)
+	testHandler.PostGlobalMessage(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 (collapsed cross-user), got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostGlobalMessage_RejectsArchivedAgent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	// Archive the agent.
+	if _, err := testPool.Exec(context.Background(),
+		`UPDATE agent SET archived_at = now() WHERE id = $1`, f.ClaudeCodeAgentID,
+	); err != nil {
+		t.Fatalf("archive agent: %v", err)
+	}
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages", map[string]any{
+		"body":     "hi",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	testHandler.PostGlobalMessage(w, req)
+	// Service-level lookup `GetGlobalAgentForUser` filters out archived
+	// agents so the user gets a 404 here too — equivalent to "no longer
+	// available". (If a future pass wants 422 instead, swap the filter
+	// in service.ListGlobalAgents to include archived rows and rely on
+	// the explicit ArchivedAt check in the handler.)
+	if w.Code != http.StatusNotFound && w.Code != http.StatusUnprocessableEntity {
+		t.Fatalf("expected 404 or 422 for archived agent, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestListGlobalChatAgents_ParseUUIDOK(t *testing.T) {
+	// Smoke: parseUUID must accept the seeded agent IDs (catches a
+	// regression where the helper would silently mark them invalid).
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+	if u := parseUUID(f.TwinAgentID); !u.Valid {
+		t.Errorf("twin id %q failed to parse", f.TwinAgentID)
+	}
+	if u := parseUUID(f.ClaudeCodeAgentID); !u.Valid {
+		t.Errorf("claude id %q failed to parse", f.ClaudeCodeAgentID)
+	}
+}
+
+// bytesBuffer returns a JSON-encoded request body wrapped in an
+// io.Reader. Local helper so the cross-user test can build a request
+// outside of newRequest (which forces X-User-ID = testUserID).
+func bytesBuffer(v any) io.Reader {
+	b, _ := json.Marshal(v)
+	return bytes.NewReader(b)
 }
 
 func TestListGlobalMirrors_Unauthenticated(t *testing.T) {

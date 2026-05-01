@@ -300,9 +300,37 @@ RETURNING *;
 -- name: GetGlobalAgentByUser :one
 -- Looks up the user's global "Cuong Pho" digital-twin agent. Agents at
 -- scope='global' have user_id set and workspace_id NULL.
+--
+-- Historically (V1, migration 060) a unique index pinned a user to a
+-- single global agent and this query returned the only match. V3 removes
+-- that uniqueness (multiple global agents per user — twin + Claude Code +
+-- ...), so callers that assume "the one global agent" are now wrong.
+-- ORDER BY created_at ASC + LIMIT 1 keeps callers that *only* want the
+-- twin (the original Cuong Pho row, oldest by definition) backwards
+-- compatible until they migrate to GetGlobalAgentByUserAndName.
 SELECT * FROM agent
 WHERE scope = 'global' AND user_id = $1
+ORDER BY created_at ASC
 LIMIT 1;
+
+-- name: GetGlobalAgentByUserAndName :one
+-- Idempotent lookup keyed on (user_id, name) for a global agent. Backs
+-- the EnsureClaudeCodeGlobalAgent bootstrap so a duplicate insert never
+-- lands when EnsureSession races against a concurrent first call.
+SELECT * FROM agent
+WHERE scope = 'global' AND user_id = $1 AND name = $2
+LIMIT 1;
+
+-- name: ListGlobalAgentsByUser :many
+-- Returns every non-archived global agent for a user. Backs the global
+-- chat agent picker (`GET /api/global/chat/agents`). Ordered by
+-- created_at ASC so the original "Cuong Pho" twin (the oldest row)
+-- always ships ahead of the Claude Code agent and any future additions —
+-- the FE picker uses the first item only as a stable reference, not as
+-- the default; the user-selected default lives in user settings.
+SELECT * FROM agent
+WHERE scope = 'global' AND user_id = $1 AND archived_at IS NULL
+ORDER BY created_at ASC;
 
 -- name: CreateGlobalAgent :one
 -- Creates a global-scope agent bound to a user. workspace_id is NULL by
