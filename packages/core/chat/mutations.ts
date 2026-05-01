@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api } from "../api";
-import { useWorkspaceId } from "../hooks";
+import { useCurrentWorkspace } from "../paths";
 import { chatKeys } from "./queries";
 import { createLogger } from "../logger";
 import type { ChatSession, SendChatMessageResponse } from "../types";
@@ -11,14 +11,23 @@ const logger = createLogger("chat.mut");
 // (and the matching `wsId` for cache invalidation) when the consuming UI runs
 // outside the target workspace's URL segment, e.g. global-chat V2 lanes.
 //
-// Inside a workspace route, omit both — `useWorkspaceId()` resolves wsId from
-// the URL-driven Context and the api client picks the slug from
-// workspace-storage as today.
+// Inside a workspace route, omit both — `useCurrentWorkspace()` resolves the
+// ambient wsId from the URL-driven Context and the api client picks the slug
+// from workspace-storage as today.
 
 export function useCreateChatSession(opts?: { wsId?: string; wsSlug?: string }) {
   const qc = useQueryClient();
-  const ambientWsId = useWorkspaceId();
-  const wsId = opts?.wsId ?? ambientWsId;
+  // Prefer the explicit `opts.wsId` — `useWorkspaceId()` throws when there
+  // is no ambient workspace, which would break this hook on `/global/chat`
+  // V2 lanes. Fall back to the ambient workspace only when no explicit id
+  // was given (the in-workspace `/chat` call site).
+  const ambient = useCurrentWorkspace();
+  const wsId = opts?.wsId ?? ambient?.id;
+  if (!wsId) {
+    throw new Error(
+      "useCreateChatSession: no workspace id — pass opts.wsId or render inside a workspace route",
+    );
+  }
   const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
 
   return useMutation({
@@ -49,8 +58,14 @@ export function useCreateChatSession(opts?: { wsId?: string; wsSlug?: string }) 
  */
 export function useFindOrCreateChatSession(opts?: { wsId?: string; wsSlug?: string }) {
   const qc = useQueryClient();
-  const ambientWsId = useWorkspaceId();
-  const wsId = opts?.wsId ?? ambientWsId;
+  // See useCreateChatSession — explicit opts win, ambient is only a fallback.
+  const ambient = useCurrentWorkspace();
+  const wsId = opts?.wsId ?? ambient?.id;
+  if (!wsId) {
+    throw new Error(
+      "useFindOrCreateChatSession: no workspace id — pass opts.wsId or render inside a workspace route",
+    );
+  }
   const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
 
   return useMutation({
@@ -99,14 +114,23 @@ export function useSendChatMessage(opts?: { wsSlug?: string }) {
  * immediately. The server broadcasts chat:session_read so other devices
  * also sync.
  */
-export function useMarkChatSessionRead() {
+export function useMarkChatSessionRead(opts?: { wsId?: string; wsSlug?: string }) {
   const qc = useQueryClient();
-  const wsId = useWorkspaceId();
+  // See useCreateChatSession — explicit opts win, ambient is only a fallback,
+  // and we tolerate "no ambient workspace" so global-chat lanes can call this.
+  const ambient = useCurrentWorkspace();
+  const wsId = opts?.wsId ?? ambient?.id;
+  if (!wsId) {
+    throw new Error(
+      "useMarkChatSessionRead: no workspace id — pass opts.wsId or render inside a workspace route",
+    );
+  }
+  const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
 
   return useMutation({
     mutationFn: (sessionId: string) => {
       logger.info("markChatSessionRead.start", { sessionId });
-      return api.markChatSessionRead(sessionId);
+      return api.markChatSessionRead(sessionId, reqOpts);
     },
     onMutate: async (sessionId) => {
       await qc.cancelQueries({ queryKey: chatKeys.sessions(wsId) });
@@ -134,14 +158,21 @@ export function useMarkChatSessionRead() {
   });
 }
 
-export function useArchiveChatSession() {
+export function useArchiveChatSession(opts?: { wsId?: string; wsSlug?: string }) {
   const qc = useQueryClient();
-  const wsId = useWorkspaceId();
+  const ambient = useCurrentWorkspace();
+  const wsId = opts?.wsId ?? ambient?.id;
+  if (!wsId) {
+    throw new Error(
+      "useArchiveChatSession: no workspace id — pass opts.wsId or render inside a workspace route",
+    );
+  }
+  const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
 
   return useMutation({
     mutationFn: (sessionId: string) => {
       logger.info("archiveChatSession.start", { sessionId });
-      return api.archiveChatSession(sessionId);
+      return api.archiveChatSession(sessionId, reqOpts);
     },
     onMutate: async (sessionId) => {
       await qc.cancelQueries({ queryKey: chatKeys.sessions(wsId) });

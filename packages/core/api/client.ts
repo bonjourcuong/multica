@@ -1034,12 +1034,12 @@ export class ApiClient {
     return this.fetch(`/api/chat/pending-tasks`);
   }
 
-  async markChatSessionRead(sessionId: string): Promise<void> {
-    await this.fetch(`/api/chat/sessions/${sessionId}/read`, { method: "POST" });
+  async markChatSessionRead(sessionId: string, opts?: RequestOptions): Promise<void> {
+    await this.fetch(`/api/chat/sessions/${sessionId}/read`, { method: "POST" }, opts);
   }
 
-  async cancelTaskById(taskId: string): Promise<void> {
-    await this.fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" });
+  async cancelTaskById(taskId: string, opts?: RequestOptions): Promise<void> {
+    await this.fetch(`/api/tasks/${taskId}/cancel`, { method: "POST" }, opts);
   }
 
   // Global Chat (cross-workspace orchestrator)
