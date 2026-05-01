@@ -1,12 +1,25 @@
--- Reverts 061_fix_agent_runtime_id_nullable.
+-- Reverts 061_fix_agent_runtime_id_nullable: intentional no-op.
 --
--- The ALTER will fail if any agent row has runtime_id = NULL (typically
--- the V1 "Cuong Pho" twin agents). Operators rolling back must first
--- decide what to do with those rows — deleting them also drops the
--- global_chat_session that references them, since the FK is non-cascading.
+-- Once 061 is applied, service.ensureGlobalAgent inserts the V1 "Cuong Pho"
+-- global twin with runtime_id = NULL by design (the twin is a runtime-less
+-- orchestrator). Re-adding NOT NULL on agent.runtime_id from this script
+-- would either:
+--
+--   (a) fail outright with SQLSTATE 23502 when any twin row is present, or
+--   (b) require destructive cleanup — the FK from global_chat_session.agent_id
+--       to agent(id) is non-cascading, so deleting the runtime-less twin to
+--       satisfy NOT NULL would either error on the FK or, if the twin is
+--       force-deleted with the session, silently lose the user's global chat
+--       history.
+--
+-- Neither is a safe automated rollback path. Operators who need to revert
+-- the nullable contract must first decide manually how to handle runtime-less
+-- twins (assign a placeholder runtime_id, or accept the data loss and remove
+-- the rows + their global_chat_session) and then run the ALTER TABLE by hand
+-- outside this migration.
+--
+-- This file therefore performs no schema change. The migration row is still
+-- removed from schema_migrations by the runner, so a subsequent `up` will
+-- re-apply 061 cleanly.
 
-BEGIN;
-
-ALTER TABLE agent ALTER COLUMN runtime_id SET NOT NULL;
-
-COMMIT;
+SELECT 1;
