@@ -143,9 +143,29 @@ test.describe("Cross-workspace meta view", () => {
     );
   });
 
-  test.skip("UI status filter narrows the board and updates the URL", async () => {
-    // Gap as of 2026-05-01: GlobalKanban only parses/round-trips
-    // `workspace_ids`; no status filter control is rendered yet.
+  test("UI status filter narrows the board and updates the URL", async ({
+    page,
+  }) => {
+    await page.goto("/global");
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(30);
+
+    await page.getByTestId("status-filter-chip-in_progress").click();
+
+    await expect(page).toHaveURL(/[?&]status=in_progress\b/);
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(6);
+    await expect(
+      page.getByTestId("status-filter-chip-in_progress"),
+    ).toHaveAttribute("aria-checked", "true");
+
+    await page.reload();
+    await expect(
+      page.getByTestId("status-filter-chip-in_progress"),
+    ).toHaveAttribute("aria-checked", "true");
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(6);
+
+    await page.getByTestId("status-filter-clear").click();
+    await expect(page).not.toHaveURL(/[?&]status=/);
+    await expect(page.getByTestId("global-kanban-card")).toHaveCount(30);
   });
 
   test.skip("realtime issue creation appears on /global within 2s", async () => {
