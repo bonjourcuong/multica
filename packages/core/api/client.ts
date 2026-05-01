@@ -98,6 +98,22 @@ export interface ApiClientIdentity {
   os?: string;
 }
 
+/**
+ * Per-call request options. Currently only `workspaceSlug` — overrides the
+ * ambient `X-Workspace-Slug` header for this single request without touching
+ * the workspace-storage singleton. Callers thread this through when they need
+ * to call a workspace-scoped endpoint for a workspace OTHER than the URL
+ * ambient one (notably `/global/chat` lanes, which run outside any workspace
+ * route segment yet talk to per-workspace chat sessions).
+ *
+ * Omit it and behavior is identical to today: the slug is read from
+ * `getCurrentSlug()` and reflects whatever the URL-driven workspace layout
+ * last set. Existing call sites that don't pass an override are unaffected.
+ */
+export interface RequestOptions {
+  workspaceSlug?: string;
+}
+
 export interface ApiClientOptions {
   logger?: Logger;
   onUnauthorized?: () => void;
@@ -215,10 +231,10 @@ export class ApiClient {
     return match ? match.split("=")[1] ?? null : null;
   }
 
-  private authHeaders(): Record<string, string> {
+  private authHeaders(workspaceSlugOverride?: string): Record<string, string> {
     const headers: Record<string, string> = {};
     if (this.token) headers["Authorization"] = `Bearer ${this.token}`;
-    const slug = getCurrentSlug();
+    const slug = workspaceSlugOverride ?? getCurrentSlug();
     if (slug) headers["X-Workspace-Slug"] = slug;
     const csrf = this.readCsrfToken();
     if (csrf) headers["X-CSRF-Token"] = csrf;
@@ -250,7 +266,7 @@ export class ApiClient {
     return { message: fallback };
   }
 
-  private async fetch<T>(path: string, init?: RequestInit): Promise<T> {
+  private async fetch<T>(path: string, init?: RequestInit, opts?: RequestOptions): Promise<T> {
     const rid = createRequestId();
     const start = Date.now();
     const method = init?.method ?? "GET";
@@ -258,7 +274,7 @@ export class ApiClient {
     const headers: Record<string, string> = {
       "Content-Type": "application/json",
       "X-Request-ID": rid,
-      ...this.authHeaders(),
+      ...this.authHeaders(opts?.workspaceSlug),
       ...((init?.headers as Record<string, string>) ?? {}),
     };
 
@@ -582,11 +598,14 @@ export class ApiClient {
   }
 
   // Agents
-  async listAgents(params?: { workspace_id?: string; include_archived?: boolean }): Promise<Agent[]> {
+  async listAgents(
+    params?: { workspace_id?: string; include_archived?: boolean },
+    opts?: RequestOptions,
+  ): Promise<Agent[]> {
     const search = new URLSearchParams();
     if (params?.workspace_id) search.set("workspace_id", params.workspace_id);
     if (params?.include_archived) search.set("include_archived", "true");
-    return this.fetch(`/api/agents?${search}`);
+    return this.fetch(`/api/agents?${search}`, undefined, opts);
   }
 
   async getAgent(id: string): Promise<Agent> {
@@ -948,39 +967,67 @@ export class ApiClient {
   }
 
   // Chat Sessions
-  async listChatSessions(params?: { status?: string }): Promise<ChatSession[]> {
+  async listChatSessions(
+    params?: { status?: string },
+    opts?: RequestOptions,
+  ): Promise<ChatSession[]> {
     const query = params?.status ? `?status=${params.status}` : "";
-    return this.fetch(`/api/chat/sessions${query}`);
+    return this.fetch(`/api/chat/sessions${query}`, undefined, opts);
   }
 
-  async getChatSession(id: string): Promise<ChatSession> {
-    return this.fetch(`/api/chat/sessions/${id}`);
+  async getChatSession(id: string, opts?: RequestOptions): Promise<ChatSession> {
+    return this.fetch(`/api/chat/sessions/${id}`, undefined, opts);
   }
 
-  async createChatSession(data: { agent_id: string; title?: string }): Promise<ChatSession> {
+  async createChatSession(
+    data: { agent_id: string; title?: string },
+    opts?: RequestOptions,
+  ): Promise<ChatSession> {
     return this.fetch("/api/chat/sessions", {
       method: "POST",
       body: JSON.stringify(data),
-    });
+    }, opts);
   }
 
-  async archiveChatSession(id: string): Promise<void> {
-    await this.fetch(`/api/chat/sessions/${id}`, { method: "DELETE" });
+  /**
+   * Idempotent lane bootstrap: returns the most recently touched workspace-scope
+   * active session for `(workspace, creator=me, agent)` if one exists (200), or
+   * creates and returns one otherwise (201). The server filters
+   * `scope='workspace'`, so a `global_mirror` session never leaks into the
+   * response. Used by global-chat V2 lanes so reopening a lane lands on the
+   * same thread instead of forking a new one each time.
+   */
+  async findOrCreateChatSession(
+    data: { agent_id: string; title?: string },
+    opts?: RequestOptions,
+  ): Promise<ChatSession> {
+    return this.fetch("/api/chat/sessions/find-or-create", {
+      method: "POST",
+      body: JSON.stringify(data),
+    }, opts);
   }
 
-  async listChatMessages(sessionId: string): Promise<ChatMessage[]> {
-    return this.fetch(`/api/chat/sessions/${sessionId}/messages`);
+  async archiveChatSession(id: string, opts?: RequestOptions): Promise<void> {
+    await this.fetch(`/api/chat/sessions/${id}`, { method: "DELETE" }, opts);
   }
 
-  async sendChatMessage(sessionId: string, content: string): Promise<SendChatMessageResponse> {
+  async listChatMessages(sessionId: string, opts?: RequestOptions): Promise<ChatMessage[]> {
+    return this.fetch(`/api/chat/sessions/${sessionId}/messages`, undefined, opts);
+  }
+
+  async sendChatMessage(
+    sessionId: string,
+    content: string,
+    opts?: RequestOptions,
+  ): Promise<SendChatMessageResponse> {
     return this.fetch(`/api/chat/sessions/${sessionId}/messages`, {
       method: "POST",
       body: JSON.stringify({ content }),
-    });
+    }, opts);
   }
 
-  async getPendingChatTask(sessionId: string): Promise<ChatPendingTask> {
-    return this.fetch(`/api/chat/sessions/${sessionId}/pending-task`);
+  async getPendingChatTask(sessionId: string, opts?: RequestOptions): Promise<ChatPendingTask> {
+    return this.fetch(`/api/chat/sessions/${sessionId}/pending-task`, undefined, opts);
   }
 
   async listPendingChatTasks(): Promise<PendingChatTasksResponse> {

@@ -3,18 +3,28 @@ import { api } from "../api";
 import { useWorkspaceId } from "../hooks";
 import { chatKeys } from "./queries";
 import { createLogger } from "../logger";
-import type { ChatSession } from "../types";
+import type { ChatSession, SendChatMessageResponse } from "../types";
 
 const logger = createLogger("chat.mut");
 
-export function useCreateChatSession() {
+// Per-call workspace override — see queries.ts for the rationale. Pass `wsSlug`
+// (and the matching `wsId` for cache invalidation) when the consuming UI runs
+// outside the target workspace's URL segment, e.g. global-chat V2 lanes.
+//
+// Inside a workspace route, omit both — `useWorkspaceId()` resolves wsId from
+// the URL-driven Context and the api client picks the slug from
+// workspace-storage as today.
+
+export function useCreateChatSession(opts?: { wsId?: string; wsSlug?: string }) {
   const qc = useQueryClient();
-  const wsId = useWorkspaceId();
+  const ambientWsId = useWorkspaceId();
+  const wsId = opts?.wsId ?? ambientWsId;
+  const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
 
   return useMutation({
     mutationFn: (data: { agent_id: string; title?: string }) => {
       logger.info("createChatSession.start", { agent_id: data.agent_id, titleLength: data.title?.length ?? 0 });
-      return api.createChatSession(data);
+      return api.createChatSession(data, reqOpts);
     },
     onSuccess: (session) => {
       logger.info("createChatSession.success", { sessionId: session.id, agentId: session.agent_id });
@@ -25,6 +35,60 @@ export function useCreateChatSession() {
     onSettled: () => {
       qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
       qc.invalidateQueries({ queryKey: chatKeys.allSessions(wsId) });
+    },
+  });
+}
+
+/**
+ * Idempotent lane bootstrap — wraps `POST /api/chat/sessions/find-or-create`.
+ * Returns the existing active workspace-scope session for `(workspace, me,
+ * agent)` if any (HTTP 200); creates one and returns it otherwise (HTTP 201).
+ * Use this from the global-chat V2 lanes so reopening a lane lands on the
+ * same thread instead of forking a new one each time. Pass `wsSlug` to target
+ * a workspace other than the URL-ambient one.
+ */
+export function useFindOrCreateChatSession(opts?: { wsId?: string; wsSlug?: string }) {
+  const qc = useQueryClient();
+  const ambientWsId = useWorkspaceId();
+  const wsId = opts?.wsId ?? ambientWsId;
+  const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
+
+  return useMutation({
+    mutationFn: (data: { agent_id: string; title?: string }) => {
+      logger.info("findOrCreateChatSession.start", { agent_id: data.agent_id });
+      return api.findOrCreateChatSession(data, reqOpts);
+    },
+    onSuccess: (session) => {
+      logger.info("findOrCreateChatSession.success", { sessionId: session.id, agentId: session.agent_id });
+    },
+    onError: (err) => {
+      logger.error("findOrCreateChatSession.error", err);
+    },
+    onSettled: () => {
+      qc.invalidateQueries({ queryKey: chatKeys.sessions(wsId) });
+      qc.invalidateQueries({ queryKey: chatKeys.allSessions(wsId) });
+    },
+  });
+}
+
+/**
+ * Sends a user message into an existing chat session. Thin wrapper over
+ * `api.sendChatMessage`; exists so callers running outside the session's
+ * workspace (global-chat V2 lanes) can pass `wsSlug` per-call. The optimistic
+ * insert + pending-task seed remains the caller's responsibility (the
+ * existing chat-page does it inline; this hook does not duplicate that
+ * logic to avoid shifting behaviour for in-workspace callers).
+ */
+export function useSendChatMessage(opts?: { wsSlug?: string }) {
+  const reqOpts = opts?.wsSlug ? { workspaceSlug: opts.wsSlug } : undefined;
+
+  return useMutation<SendChatMessageResponse, unknown, { sessionId: string; content: string }>({
+    mutationFn: ({ sessionId, content }) => {
+      logger.info("sendChatMessage.start", { sessionId, contentLength: content.length });
+      return api.sendChatMessage(sessionId, content, reqOpts);
+    },
+    onError: (err, vars) => {
+      logger.error("sendChatMessage.error", { sessionId: vars.sessionId, err });
     },
   });
 }
