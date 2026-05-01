@@ -136,6 +136,9 @@ func TestEnsureSession_BootstrapsAgentAndSession(t *testing.T) {
 	if f.createParams[0].UserID != user {
 		t.Error("expected agent bound to user")
 	}
+	if f.createParams[0].RuntimeID.Valid {
+		t.Error("expected runtime-less twin (RuntimeID.Valid = false); migration 061 keeps agent.runtime_id nullable for this case (MUL-141)")
+	}
 }
 
 func TestEnsureSession_Idempotent(t *testing.T) {
