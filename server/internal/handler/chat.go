@@ -64,6 +64,69 @@ func (h *Handler) CreateChatSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, chatSessionToResponse(session))
 }
 
+// FindOrCreateChatSession is POST /api/chat/sessions/find-or-create. Returns
+// the most recently touched workspace-scope active session for (workspace,
+// creator=me, agent) when one exists (200), creates one and returns it
+// otherwise (201). Backs the global-chat V2 lanes: reopening a lane lands on
+// the same workspace thread instead of forking a new one each time.
+//
+// Response shape mirrors CreateChatSession so the FE re-uses its current
+// types. The find query is scoped to scope='workspace', so a global_mirror
+// row is never returned.
+func (h *Handler) FindOrCreateChatSession(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+	workspaceID := ctxWorkspaceID(r.Context())
+
+	var req CreateChatSessionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.AgentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id is required")
+		return
+	}
+
+	agent, err := h.Queries.GetAgentInWorkspace(r.Context(), db.GetAgentInWorkspaceParams{
+		ID:          parseUUID(req.AgentID),
+		WorkspaceID: parseUUID(workspaceID),
+	})
+	if err != nil {
+		writeError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	if agent.ArchivedAt.Valid {
+		writeError(w, http.StatusBadRequest, "agent is archived")
+		return
+	}
+
+	existing, err := h.Queries.GetActiveChatSessionByCreatorAndAgent(r.Context(), db.GetActiveChatSessionByCreatorAndAgentParams{
+		WorkspaceID: parseUUID(workspaceID),
+		CreatorID:   parseUUID(userID),
+		AgentID:     parseUUID(req.AgentID),
+	})
+	if err == nil {
+		writeJSON(w, http.StatusOK, chatSessionToResponse(existing))
+		return
+	}
+
+	session, err := h.Queries.CreateChatSession(r.Context(), db.CreateChatSessionParams{
+		WorkspaceID: parseUUID(workspaceID),
+		AgentID:     parseUUID(req.AgentID),
+		CreatorID:   parseUUID(userID),
+		Title:       req.Title,
+	})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to create chat session")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, chatSessionToResponse(session))
+}
+
 func (h *Handler) ListChatSessions(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {

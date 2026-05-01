@@ -178,6 +178,52 @@ func (q *Queries) CreateGlobalMirrorSession(ctx context.Context, arg CreateGloba
 	return i, err
 }
 
+const getActiveChatSessionByCreatorAndAgent = `-- name: GetActiveChatSessionByCreatorAndAgent :one
+SELECT id, workspace_id, agent_id, creator_id, title, session_id, work_dir, status, created_at, updated_at, unread_since, scope FROM chat_session
+WHERE workspace_id = $1
+  AND creator_id   = $2
+  AND agent_id     = $3
+  AND status       = 'active'
+  AND scope        = 'workspace'
+ORDER BY updated_at DESC
+LIMIT 1
+`
+
+type GetActiveChatSessionByCreatorAndAgentParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	CreatorID   pgtype.UUID `json:"creator_id"`
+	AgentID     pgtype.UUID `json:"agent_id"`
+}
+
+// Looks up the most recently touched workspace-scope active session for the
+// (workspace, creator, agent) triple. Backs the find-or-create endpoint that
+// the global-chat V2 lanes use so reopening a lane lands on the existing
+// thread instead of forking a new one.
+//
+// The `scope = 'workspace'` predicate is essential: must NOT match
+// 'global_mirror' rows (the per-workspace twin sessions used by the global
+// broadcaster). Removing it would silently route lane traffic into the
+// mirror thread.
+func (q *Queries) GetActiveChatSessionByCreatorAndAgent(ctx context.Context, arg GetActiveChatSessionByCreatorAndAgentParams) (ChatSession, error) {
+	row := q.db.QueryRow(ctx, getActiveChatSessionByCreatorAndAgent, arg.WorkspaceID, arg.CreatorID, arg.AgentID)
+	var i ChatSession
+	err := row.Scan(
+		&i.ID,
+		&i.WorkspaceID,
+		&i.AgentID,
+		&i.CreatorID,
+		&i.Title,
+		&i.SessionID,
+		&i.WorkDir,
+		&i.Status,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.UnreadSince,
+		&i.Scope,
+	)
+	return i, err
+}
+
 const getChatMessage = `-- name: GetChatMessage :one
 SELECT id, chat_session_id, role, content, task_id, created_at, metadata FROM chat_message
 WHERE id = $1

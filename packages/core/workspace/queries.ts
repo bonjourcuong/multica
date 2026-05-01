@@ -35,11 +35,21 @@ export function memberListOptions(wsId: string) {
   });
 }
 
-export function agentListOptions(wsId: string) {
+/**
+ * Pickable agents for a given workspace. Pass `wsSlug` when calling from a
+ * surface that runs OUTSIDE that workspace's URL segment (e.g. global-chat
+ * V2 lanes), so the underlying request carries the right `X-Workspace-Slug`
+ * header instead of the URL-ambient one. Inside a workspace route, leave it
+ * undefined — the api client reads the slug from workspace-storage as today.
+ */
+export function agentListOptions(wsId: string, wsSlug?: string) {
   return queryOptions({
     queryKey: workspaceKeys.agents(wsId),
     queryFn: () =>
-      api.listAgents({ workspace_id: wsId, include_archived: true }),
+      api.listAgents(
+        { workspace_id: wsId, include_archived: true },
+        wsSlug ? { workspaceSlug: wsSlug } : undefined,
+      ),
   });
 }
 

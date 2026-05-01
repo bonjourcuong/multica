@@ -21,35 +21,46 @@ export const chatKeys = {
   taskMessages: (taskId: string) => ["task-messages", taskId] as const,
 };
 
-export function chatSessionsOptions(wsId: string) {
+// Per-call workspace override:
+//   `wsSlug` is forwarded to the api client as `X-Workspace-Slug` for THIS
+//   request only. Pass it when the consuming UI runs outside the target
+//   workspace's URL segment (notably global-chat V2 lanes, which sit at
+//   `/global/chat` yet hit per-workspace endpoints). Leave it undefined inside
+//   a workspace route — the client reads the slug from workspace-storage as
+//   before, so existing call sites are unaffected.
+
+export function chatSessionsOptions(wsId: string, wsSlug?: string) {
   return queryOptions({
     queryKey: chatKeys.sessions(wsId),
-    queryFn: () => api.listChatSessions(),
+    queryFn: () =>
+      api.listChatSessions(undefined, wsSlug ? { workspaceSlug: wsSlug } : undefined),
     staleTime: Infinity,
   });
 }
 
-export function allChatSessionsOptions(wsId: string) {
+export function allChatSessionsOptions(wsId: string, wsSlug?: string) {
   return queryOptions({
     queryKey: chatKeys.allSessions(wsId),
-    queryFn: () => api.listChatSessions({ status: "all" }),
+    queryFn: () =>
+      api.listChatSessions({ status: "all" }, wsSlug ? { workspaceSlug: wsSlug } : undefined),
     staleTime: Infinity,
   });
 }
 
-export function chatSessionOptions(wsId: string, id: string) {
+export function chatSessionOptions(wsId: string, id: string, wsSlug?: string) {
   return queryOptions({
     queryKey: chatKeys.session(wsId, id),
-    queryFn: () => api.getChatSession(id),
+    queryFn: () => api.getChatSession(id, wsSlug ? { workspaceSlug: wsSlug } : undefined),
     enabled: !!id,
     staleTime: Infinity,
   });
 }
 
-export function chatMessagesOptions(sessionId: string) {
+export function chatMessagesOptions(sessionId: string, wsSlug?: string) {
   return queryOptions({
     queryKey: chatKeys.messages(sessionId),
-    queryFn: () => api.listChatMessages(sessionId),
+    queryFn: () =>
+      api.listChatMessages(sessionId, wsSlug ? { workspaceSlug: wsSlug } : undefined),
     enabled: !!sessionId,
     staleTime: Infinity,
   });
@@ -60,10 +71,11 @@ export function chatMessagesOptions(sessionId: string) {
  * Refetched via WS invalidation in useRealtimeSync when chat:message / chat:done
  * / task:completed / task:failed arrive.
  */
-export function pendingChatTaskOptions(sessionId: string) {
+export function pendingChatTaskOptions(sessionId: string, wsSlug?: string) {
   return queryOptions({
     queryKey: chatKeys.pendingTask(sessionId),
-    queryFn: () => api.getPendingChatTask(sessionId),
+    queryFn: () =>
+      api.getPendingChatTask(sessionId, wsSlug ? { workspaceSlug: wsSlug } : undefined),
     enabled: !!sessionId,
     staleTime: Infinity,
   });
