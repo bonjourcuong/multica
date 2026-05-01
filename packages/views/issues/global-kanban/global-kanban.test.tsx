@@ -26,6 +26,13 @@ vi.mock("@multica/core/api", () => ({
   },
 }));
 
+// Stub the WS provider — no real WebSocket plumbing in this DOM-only test.
+// The cross-workspace realtime hook called by GlobalKanban does no work when
+// it can't open extra connections, so a no-op factory is enough.
+vi.mock("@multica/core/realtime", () => ({
+  useExtraWorkspaceWSEvents: () => {},
+}));
+
 function makeWorkspace(over: Partial<Workspace> = {}): Workspace {
   return {
     id: "00000000-0000-0000-0000-0000000000aa",

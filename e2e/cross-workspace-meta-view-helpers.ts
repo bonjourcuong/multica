@@ -110,26 +110,36 @@ export async function loginLimitedMetaUser(page: Page): Promise<MetaFixture> {
   return { token, userId, ...fixture };
 }
 
+/**
+ * Create an issue through the public API so the handler publishes
+ * `issue:created` on the workspace's WS scope. A direct DB insert bypasses
+ * the event bus and would never reach a connected client — fine for seeding
+ * static fixtures, but useless when the test asserts realtime fan-out.
+ */
 export async function createRealtimeIssue(
   workspace: MetaWorkspaceFixture,
-  userId: string,
+  token: string,
   title: string,
 ) {
-  const client = new pg.Client(DATABASE_URL);
-  await client.connect();
-  try {
-    const number = await nextIssueNumber(client, workspace.id);
-    const result = await client.query<{ id: string }>(
-      `INSERT INTO issue (
-         workspace_id, title, status, priority, creator_type, creator_id, number
-       ) VALUES ($1, $2, 'todo', 'medium', 'member', $3, $4)
-       RETURNING id`,
-      [workspace.id, title, userId, number],
+  const apiBase =
+    process.env.NEXT_PUBLIC_API_URL ||
+    `http://localhost:${process.env.PORT || "8080"}`;
+  const res = await fetch(`${apiBase}/api/issues`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Workspace-Slug": workspace.slug,
+      Authorization: `Bearer ${token}`,
+    },
+    body: JSON.stringify({ title }),
+  });
+  if (!res.ok) {
+    throw new Error(
+      `POST /api/issues failed for ${workspace.slug}: ${res.status}`,
     );
-    return result.rows[0]!.id;
-  } finally {
-    await client.end();
   }
+  const data = (await res.json()) as { id: string };
+  return data.id;
 }
 
 export async function listCrossWorkspaceIssues(
@@ -252,13 +262,3 @@ async function resetWorkspaceIssues(client: pg.Client, workspaceId: string) {
   ]);
 }
 
-async function nextIssueNumber(client: pg.Client, workspaceId: string) {
-  const result = await client.query<{ issue_counter: number }>(
-    `UPDATE workspace
-     SET issue_counter = issue_counter + 1
-     WHERE id = $1
-     RETURNING issue_counter`,
-    [workspaceId],
-  );
-  return result.rows[0]!.issue_counter;
-}
