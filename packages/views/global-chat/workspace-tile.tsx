@@ -1,5 +1,6 @@
 "use client";
 
+import type { KeyboardEvent } from "react";
 import type { TileDispatchState } from "@multica/core/global-chat";
 import { workspaceColor } from "@multica/core/workspace/color";
 import { cn } from "@multica/ui/lib/utils";
@@ -23,6 +24,12 @@ export interface WorkspaceTileProps {
   workspace: WorkspaceTileSpec;
   /** Per-target dispatch state for the most recent global-chat submission. */
   dispatchState?: TileDispatchState;
+  /**
+   * Optional click handler — clicking the tile opens (or activates) that
+   * workspace's V2 lane in the global-chat rail. Tile is rendered as a
+   * static card when omitted (test/preview surfaces).
+   */
+  onOpenLane?: (workspaceId: string) => void;
 }
 
 /**
@@ -34,18 +41,43 @@ export interface WorkspaceTileProps {
 export function WorkspaceTile({
   workspace,
   dispatchState = "idle",
+  onOpenLane,
 }: WorkspaceTileProps) {
   const { messages } = useWorkspaceMirror(workspace.mirror_session_id);
   const initials = workspace.workspace_name.slice(0, 2).toUpperCase();
   const swatch = workspaceColor(workspace.workspace_id);
+
+  // The tile becomes a button when an onOpenLane handler is wired (V2 lanes
+  // entry point — DoD bullet 4); otherwise it stays a plain article so the
+  // V1 surface and unit tests don't grow accidental click semantics.
+  const interactive = !!onOpenLane;
+
+  const interactiveProps = interactive
+    ? {
+        role: "button" as const,
+        tabIndex: 0,
+        onClick: () => onOpenLane?.(workspace.workspace_id),
+        onKeyDown: (e: KeyboardEvent<HTMLElement>) => {
+          if (e.key === "Enter" || e.key === " ") {
+            e.preventDefault();
+            onOpenLane?.(workspace.workspace_id);
+          }
+        },
+      }
+    : {};
 
   return (
     <article
       data-testid="workspace-tile"
       data-workspace-slug={workspace.workspace_slug}
       data-dispatch-state={dispatchState}
-      className="flex min-h-0 flex-col overflow-hidden rounded-md border bg-card text-card-foreground"
+      className={cn(
+        "flex min-h-0 flex-col overflow-hidden rounded-md border bg-card text-card-foreground",
+        interactive &&
+          "cursor-pointer transition-colors hover:border-brand/40 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+      )}
       aria-label={`${workspace.workspace_name} mirror`}
+      {...interactiveProps}
     >
       <header className="flex items-center gap-2 border-b px-3 py-2">
         <span

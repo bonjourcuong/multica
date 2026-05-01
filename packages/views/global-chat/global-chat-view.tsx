@@ -8,33 +8,64 @@ import {
 } from "@multica/core/global-chat";
 import type { SendGlobalChatMessageResponse } from "@multica/core/api";
 import type { GlobalMirrorSummary } from "@multica/core/types";
+import { WorkspaceChatLane } from "@multica/views/chat";
 import { GlobalChatPane } from "./global-chat-pane";
 import { useGlobalMirrors } from "./use-global-chat";
 import { WorkspaceTilesGrid } from "./workspace-tiles-grid";
 import type { WorkspaceTileSpec } from "./workspace-tile";
+import {
+  GLOBAL_LANE_ID,
+  MAX_OPEN_WORKSPACE_LANES,
+  useLanesPersistence,
+  useLanesStore,
+} from "./lanes-store";
+import { LaneRail, buildLaneEntries } from "./lane-rail";
 
 /**
  * Top-level layout for `/global/chat`.
  *
- * Two columns side by side:
- *  - Left, fixed width (~360px): persistent chat with the user's global
- *    orchestrator agent. Sending a message can mention `@workspace[:agent]`,
- *    which triggers a backend dispatch into that workspace's mirror session.
- *  - Right, flex: a single horizontal scroll container holding a 2-row grid
- *    of workspace tiles, one per workspace the user is a member of. Each
- *    tile mirrors that workspace's "global" chat session in real time.
+ * Three columns:
+ *  - Left rail (~220px): list of open lanes — always-on Global at the top,
+ *    one entry per workspace lane the user has opened. Click activates;
+ *    hover-× closes a workspace lane (without deleting the underlying chat
+ *    session).
+ *  - Main pane (flex): the active lane's content. Either the V1
+ *    `GlobalChatPane` (orchestrator chat with @workspace dispatch) or a
+ *    `WorkspaceChatLane` for a specific workspace (normal chat thread,
+ *    backed by that workspace's chat session).
+ *  - Right grid (~V1-shaped): workspace tiles, one per workspace the user
+ *    is a member of. Tiles still mirror their workspace's "global mirror"
+ *    session in real time. Clicking a tile opens or activates that
+ *    workspace's lane in the rail (DoD bullet 4).
  *
- * Tile data comes from `GET /api/global/chat/mirrors`: one summary per
- * workspace the caller is a member of, ordered by recent mirror activity
- * (workspaces with no dispatch yet sink to the tail, so freshly joined
- * workspaces don't push active ones off-screen).
+ * All open workspace lanes stay mounted in the background so unread badges
+ * accumulate and realtime subscriptions stay live. The lane store caps
+ * background lanes at {@link MAX_OPEN_WORKSPACE_LANES} (LRU) — see ADR D8.
  */
 export function GlobalChatView() {
+  useLanesPersistence();
   const { data: mirrors } = useGlobalMirrors();
+
+  const openLanes = useLanesStore((s) => s.openLanes);
+  const activeLaneId = useLanesStore((s) => s.activeLaneId);
+  const openWorkspaceLane = useLanesStore((s) => s.openWorkspaceLane);
+  const activateLane = useLanesStore((s) => s.activateLane);
+  const closeWorkspaceLane = useLanesStore((s) => s.closeWorkspaceLane);
 
   const specs = useMemo<WorkspaceTileSpec[]>(
     () => (mirrors ?? []).map(toTileSpec),
     [mirrors],
+  );
+
+  const mirrorById = useMemo(() => {
+    const m = new Map<string, GlobalMirrorSummary>();
+    for (const x of mirrors ?? []) m.set(x.workspace_id, x);
+    return m;
+  }, [mirrors]);
+
+  const railEntries = useMemo(
+    () => buildLaneEntries(openLanes, mirrors),
+    [openLanes, mirrors],
   );
 
   const [tileStates, setTileStates] = useState<
@@ -97,16 +128,87 @@ export function GlobalChatView() {
 
   return (
     <div className="flex flex-1 gap-3 p-3 min-h-0">
+      <LaneRail
+        entries={railEntries}
+        activeLaneId={activeLaneId}
+        onActivate={activateLane}
+        onCloseWorkspace={closeWorkspaceLane}
+      />
+
+      <section
+        data-testid="lane-main"
+        className="flex min-w-0 flex-1 flex-col"
+      >
+        {/*
+          Background-mounted lanes (ADR D8): every open workspace lane stays
+          mounted so realtime subs and React Query caches stay warm; only the
+          active one is visible. The Global pane is always-on too.
+        */}
+        <div
+          data-testid="lane-global"
+          className={
+            activeLaneId === GLOBAL_LANE_ID
+              ? "flex h-full min-h-0 flex-col"
+              : "hidden"
+          }
+        >
+          <GlobalChatPane
+            onSubmit={onSubmit}
+            onResolved={onResolved}
+            onErrored={onErrored}
+          />
+        </div>
+
+        {openLanes.map((wsId) => {
+          const m = mirrorById.get(wsId);
+          const visible = activeLaneId === wsId;
+          // Slug is required to drive the workspace-slug header for every
+          // chat API call this lane fires (we are outside the workspace's
+          // URL segment, so the api client has no ambient slug to read).
+          // If the mirror hasn't loaded yet — or membership was revoked
+          // since the lane was last persisted — we skip mounting rather
+          // than fire requests against the wrong / null workspace.
+          if (!m?.workspace_slug) return null;
+          return (
+            <div
+              key={wsId}
+              data-testid="lane-workspace"
+              data-workspace-id={wsId}
+              className={
+                visible
+                  ? "flex h-full min-h-0 flex-1 flex-col"
+                  : "hidden"
+              }
+            >
+              {visible && (
+                <header className="flex items-center gap-2 border-b px-3 py-2">
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-sm font-semibold leading-tight">
+                      {m.workspace_name}
+                    </div>
+                    <div className="truncate text-[11px] text-muted-foreground">
+                      @{m.workspace_slug}
+                    </div>
+                  </div>
+                </header>
+              )}
+              <WorkspaceChatLane
+                workspaceId={wsId}
+                workspaceSlug={m.workspace_slug}
+                variant="compact"
+              />
+            </div>
+          );
+        })}
+      </section>
+
       <aside className="flex w-[360px] shrink-0 flex-col">
-        <GlobalChatPane
-          onSubmit={onSubmit}
-          onResolved={onResolved}
-          onErrored={onErrored}
+        <WorkspaceTilesGrid
+          workspaces={specs}
+          tileStates={tileStates}
+          onOpenLane={openWorkspaceLane}
         />
       </aside>
-      <section className="flex min-w-0 flex-1 flex-col">
-        <WorkspaceTilesGrid workspaces={specs} tileStates={tileStates} />
-      </section>
     </div>
   );
 }
@@ -120,3 +222,5 @@ function toTileSpec(mirror: GlobalMirrorSummary): WorkspaceTileSpec {
     last_message_at: mirror.last_message_at,
   };
 }
+
+export { MAX_OPEN_WORKSPACE_LANES };

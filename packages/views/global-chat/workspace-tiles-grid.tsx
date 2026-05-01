@@ -21,6 +21,11 @@ export interface WorkspaceTilesGridProps {
    * don't drive dispatch state (e.g. unit tests).
    */
   tileStates?: Record<string, TileDispatchState>;
+  /**
+   * Click handler forwarded to each tile. When set, tiles render as buttons
+   * and route the click to the V2 lane rail (DoD bullet 4).
+   */
+  onOpenLane?: (workspaceId: string) => void;
   /** Override for tests; production always uses {@link DEFAULT_TILE_CAP}. */
   cap?: number;
 }
@@ -36,6 +41,7 @@ export interface WorkspaceTilesGridProps {
 export function WorkspaceTilesGrid({
   workspaces,
   tileStates,
+  onOpenLane,
   cap = DEFAULT_TILE_CAP,
 }: WorkspaceTilesGridProps) {
   const [expanded, setExpanded] = useState(false);
@@ -78,6 +84,7 @@ export function WorkspaceTilesGrid({
               key={spec.workspace_id}
               workspace={spec}
               dispatchState={tileStates?.[spec.workspace_id]}
+              onOpenLane={onOpenLane}
             />
           ))}
         </div>
