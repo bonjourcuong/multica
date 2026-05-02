@@ -51,7 +51,19 @@ func (h *Handler) requireDaemonWorkspaceAccess(w http.ResponseWriter, r *http.Re
 	return ok
 }
 
-// requireDaemonRuntimeAccess looks up a runtime and verifies the caller owns its workspace.
+// requireDaemonRuntimeAccess looks up a runtime and verifies the caller owns
+// it. Workspace match is necessary but not sufficient: for daemon tokens
+// (mdt_) we additionally require the runtime to belong to this caller's
+// daemon (daemon_id match) or this caller's user (owner_id match). Without
+// that second gate any co-member who holds a valid daemon token for the
+// workspace could enumerate and claim another member's runtime — and through
+// it, hijack global-chat tasks (MUL-190 Finding #1; the fix is widened
+// because MUL-182 made workspace match the *only* isolation gate for
+// global-chat tasks).
+//
+// PAT/JWT fallback intentionally keeps the bare workspace-membership check;
+// narrowing those flows is tracked separately (MUL-190 Finding #6) because
+// it changes long-standing client behaviour and needs explicit sign-off.
 func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Request, runtimeID string) (db.AgentRuntime, bool) {
 	rt, err := h.Queries.GetAgentRuntime(r.Context(), parseUUID(runtimeID))
 	if err != nil {
@@ -61,7 +73,30 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 	if !h.requireDaemonWorkspaceAccess(w, r, uuidToString(rt.WorkspaceID)) {
 		return db.AgentRuntime{}, false
 	}
+	if daemonID := middleware.DaemonIDFromContext(r.Context()); daemonID != "" {
+		if !runtimeBoundToDaemonCaller(rt, daemonID, middleware.DaemonUserIDFromContext(r.Context())) {
+			writeError(w, http.StatusNotFound, "runtime not found")
+			return db.AgentRuntime{}, false
+		}
+	}
 	return rt, true
+}
+
+// runtimeBoundToDaemonCaller returns true when the runtime row was registered
+// by this same daemon (daemon_id match) or owned by this same user (owner_id
+// match). Either signal is sufficient: the daemon_id check covers the
+// steady-state where a daemon registers and then operates its own runtime;
+// the owner_id check covers the case where the underlying daemon_id rotated
+// (e.g. legacy hostname-derived id replaced by the persistent UUID after a
+// merge) but the user behind the token has not changed.
+func runtimeBoundToDaemonCaller(rt db.AgentRuntime, callerDaemonID, callerUserID string) bool {
+	if callerDaemonID != "" && rt.DaemonID.Valid && rt.DaemonID.String == callerDaemonID {
+		return true
+	}
+	if callerUserID != "" && rt.OwnerID.Valid && uuidToString(rt.OwnerID) == callerUserID {
+		return true
+	}
+	return false
 }
 
 // requireDaemonTaskAccess looks up a task and verifies the caller is

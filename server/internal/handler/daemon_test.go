@@ -74,8 +74,16 @@ func setHandlerTestWorkspaceRepos(t *testing.T, repos []map[string]string) {
 }
 
 // newDaemonTokenRequest creates an HTTP request with daemon token context set
-// (simulating DaemonAuth middleware for mdt_ tokens).
+// (simulating DaemonAuth middleware for mdt_ tokens). Defaults the bound
+// user to testUserID — the legitimate workspace owner — which is the right
+// fixture for the vast majority of daemon-handler tests. Use
+// newDaemonTokenRequestForUser when the test needs to exercise a different
+// minting user (e.g. a co-member trying to claim someone else's runtime).
 func newDaemonTokenRequest(method, path string, body any, workspaceID, daemonID string) *http.Request {
+	return newDaemonTokenRequestForUser(method, path, body, workspaceID, daemonID, testUserID)
+}
+
+func newDaemonTokenRequestForUser(method, path string, body any, workspaceID, daemonID, userID string) *http.Request {
 	var buf bytes.Buffer
 	if body != nil {
 		json.NewEncoder(&buf).Encode(body)
@@ -83,7 +91,7 @@ func newDaemonTokenRequest(method, path string, body any, workspaceID, daemonID 
 	req := httptest.NewRequest(method, path, &buf)
 	req.Header.Set("Content-Type", "application/json")
 	// No X-User-ID — daemon tokens don't set it.
-	ctx := middleware.WithDaemonContext(req.Context(), workspaceID, daemonID)
+	ctx := middleware.WithDaemonContext(req.Context(), workspaceID, daemonID, userID)
 	return req.WithContext(ctx)
 }
 
@@ -314,7 +322,7 @@ func TestGetTaskStatus_WithDaemonToken_CrossWorkspace(t *testing.T) {
 	req = newDaemonTokenRequest("GET", "/api/daemon/tasks/"+taskID+"/status", nil,
 		testWorkspaceID, "legit-daemon")
 	req = req.WithContext(context.WithValue(
-		middleware.WithDaemonContext(req.Context(), testWorkspaceID, "legit-daemon"),
+		middleware.WithDaemonContext(req.Context(), testWorkspaceID, "legit-daemon", testUserID),
 		chi.RouteCtxKey, rctx))
 
 	testHandler.GetTaskStatus(w, req)
@@ -1985,5 +1993,77 @@ func TestListTaskMessagesByUser_AllowlistByKind(t *testing.T) {
 	testHandler.ListTaskMessagesByUser(w, req)
 	if w.Code != http.StatusNotFound {
 		t.Fatalf("cross-workspace chat task: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// MUL-191 / MUL-190 Finding #1: a co-member who holds any valid daemon
+// token for the workspace must NOT be able to claim another member's
+// runtime by enumerating runtime IDs. Workspace match alone is no longer
+// sufficient — the runtime must also belong to this caller's daemon
+// (daemon_id match) or this caller's user (owner_id match). Without that
+// gate the co-member would receive the victim's chat body, agent
+// instructions, mcp_config and prior session id, and could forge an
+// "agent" reply via /tasks/<id>/complete.
+func TestRequireDaemonRuntimeAccess_CoMemberDaemonCannotClaimForeignRuntime(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	// Victim runtime: registered by testUserID under daemon_id "victim-daemon".
+	var victimRuntimeID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status,
+			device_info, metadata, owner_id, last_seen_at
+		)
+		VALUES ($1, $2, 'mul-191-victim-runtime', 'local', 'claude', 'online',
+			'', '{}'::jsonb, $3, now())
+		RETURNING id
+	`, testWorkspaceID, "mul-191-victim-daemon", testUserID).Scan(&victimRuntimeID); err != nil {
+		t.Fatalf("setup: create victim runtime: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, victimRuntimeID)
+	})
+
+	// Co-member: a different user who is also a member of testWorkspaceID.
+	coMemberID := createRuntimeLocalSkillTestMember(t, "member")
+
+	// /heartbeat: workspace match holds, but neither daemon_id nor
+	// owner_id matches the victim runtime → must 404 (same status code as
+	// "runtime not found" so there is no UUID-enumeration oracle).
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequestForUser(http.MethodPost, "/api/daemon/heartbeat",
+		map[string]any{"runtime_id": victimRuntimeID},
+		testWorkspaceID, "co-member-daemon", coMemberID)
+	testHandler.DaemonHeartbeat(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("DaemonHeartbeat by co-member on foreign runtime: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// /tasks/claim: the same gate must apply on the claim endpoint, since
+	// it is the actual exfiltration sink (it returns the victim's chat
+	// body, agent instructions, mcp_config and prior session id).
+	w = httptest.NewRecorder()
+	claimReq := newDaemonTokenRequestForUser(http.MethodPost, "/api/daemon/runtimes/"+victimRuntimeID+"/tasks/claim", nil,
+		testWorkspaceID, "co-member-daemon", coMemberID)
+	claimReq = withURLParam(claimReq, "runtimeId", victimRuntimeID)
+	testHandler.ClaimTaskByRuntime(w, claimReq)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("ClaimTaskByRuntime by co-member on foreign runtime: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// Positive control: the runtime's actual owner (matching daemon_id)
+	// MUST still be able to heartbeat. Without this assertion the test
+	// would also pass if the new gate accidentally rejected every caller.
+	w = httptest.NewRecorder()
+	req = newDaemonTokenRequest(http.MethodPost, "/api/daemon/heartbeat",
+		map[string]any{"runtime_id": victimRuntimeID},
+		testWorkspaceID, "mul-191-victim-daemon")
+	testHandler.DaemonHeartbeat(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("DaemonHeartbeat by legitimate owner: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }

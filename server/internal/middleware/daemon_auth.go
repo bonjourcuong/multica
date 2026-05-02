@@ -17,6 +17,7 @@ type daemonContextKey int
 const (
 	ctxKeyDaemonWorkspaceID daemonContextKey = iota
 	ctxKeyDaemonID
+	ctxKeyDaemonUserID
 )
 
 // DaemonWorkspaceIDFromContext returns the workspace ID set by DaemonAuth middleware.
@@ -31,11 +32,21 @@ func DaemonIDFromContext(ctx context.Context) string {
 	return id
 }
 
-// WithDaemonContext returns a new context with the daemon workspace ID and daemon ID set.
-// This is used by tests to simulate daemon token authentication.
-func WithDaemonContext(ctx context.Context, workspaceID, daemonID string) context.Context {
+// DaemonUserIDFromContext returns the user that minted the daemon token, set
+// by DaemonAuth middleware for mdt_-prefixed tokens. Empty for the PAT/JWT
+// fallback paths (those carry the user via X-User-ID instead).
+func DaemonUserIDFromContext(ctx context.Context) string {
+	id, _ := ctx.Value(ctxKeyDaemonUserID).(string)
+	return id
+}
+
+// WithDaemonContext returns a new context with the daemon workspace ID,
+// daemon ID, and the user that minted the token set. Used by tests to
+// simulate the DaemonAuth middleware for mdt_ tokens.
+func WithDaemonContext(ctx context.Context, workspaceID, daemonID, userID string) context.Context {
 	ctx = context.WithValue(ctx, ctxKeyDaemonWorkspaceID, workspaceID)
 	ctx = context.WithValue(ctx, ctxKeyDaemonID, daemonID)
+	ctx = context.WithValue(ctx, ctxKeyDaemonUserID, userID)
 	return ctx
 }
 
@@ -71,6 +82,7 @@ func DaemonAuth(queries *db.Queries) func(http.Handler) http.Handler {
 
 				ctx := context.WithValue(r.Context(), ctxKeyDaemonWorkspaceID, uuidToString(dt.WorkspaceID))
 				ctx = context.WithValue(ctx, ctxKeyDaemonID, dt.DaemonID)
+				ctx = context.WithValue(ctx, ctxKeyDaemonUserID, uuidToString(dt.UserID))
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
 			}
