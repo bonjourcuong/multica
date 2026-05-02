@@ -69,4 +69,10 @@ EXPOSE 3000
 ENV PORT=3000
 ENV HOSTNAME=0.0.0.0
 
+# Healthcheck (MUL-175 / F6). 127.0.0.1 (not localhost) — Next.js binds IPv4
+# while alpine resolves localhost to ::1 first. busybox wget ships with the
+# node:22-alpine base image.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:3000/ || exit 1
+
 CMD ["node", "apps/web/server.js"]

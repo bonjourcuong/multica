@@ -35,4 +35,9 @@ RUN sed -i 's/\r$//' entrypoint.sh && chmod +x entrypoint.sh
 
 EXPOSE 8080
 
+# Healthcheck (MUL-175 / F6). 127.0.0.1 (not localhost) avoids IPv6 resolution
+# pitfalls when the server only binds IPv4. busybox wget ships with alpine.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD wget -q --spider http://127.0.0.1:8080/healthz || exit 1
+
 ENTRYPOINT ["./entrypoint.sh"]
