@@ -99,6 +99,7 @@ const (
 	// Global chat events (per-user, no workspace_id)
 	EventGlobalChatMessage    = "global_chat:message"
 	EventGlobalChatDispatched = "global_chat:dispatched"
+	EventGlobalChatTaskUpdate = "global_chat:task_update"
 )
 
 // GlobalChatMessagePayload is the realtime payload pushed when a new
@@ -126,5 +127,20 @@ type GlobalChatDispatchTarget struct {
 	WorkspaceID     string `json:"workspace_id"`
 	MirrorSessionID string `json:"mirror_session_id"`
 	MirrorMessageID string `json:"mirror_message_id"`
+	Error           string `json:"error,omitempty"`
+}
+
+// GlobalChatTaskUpdatePayload is the realtime payload pushed when a
+// global-chat task changes lifecycle state (dispatched / completed /
+// failed / cancelled). Mirrors what `task:dispatch` / `task:failed` etc.
+// already do for workspace-bound tasks, but routed on the per-user channel
+// because global tasks have no `workspace_id` (MUL-192). The frontend uses
+// `status` to clear the "agent is thinking…" indicator on terminal states
+// (failed / cancelled) without waiting for the next poll refresh.
+type GlobalChatTaskUpdatePayload struct {
+	GlobalSessionID string `json:"global_session_id"`
+	TaskID          string `json:"task_id"`
+	AgentID         string `json:"agent_id"`
+	Status          string `json:"status"`
 	Error           string `json:"error,omitempty"`
 }

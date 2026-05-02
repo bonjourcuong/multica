@@ -65,7 +65,8 @@ export type WSEventType =
   | "invitation:declined"
   | "invitation:revoked"
   | "global_chat:message"
-  | "global_chat:dispatched";
+  | "global_chat:dispatched"
+  | "global_chat:task_update";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -192,6 +193,22 @@ export interface GlobalChatMessageEventPayload {
   author_id: string;
   body: string;
   created_at: string;
+}
+
+/**
+ * Realtime lifecycle ping for a global-chat task. Mirrors
+ * `protocol.GlobalChatTaskUpdatePayload` (server/pkg/protocol/events.go).
+ * Delivered on the user-scope channel because global tasks have no
+ * workspace_id. The pane reacts to terminal states (`failed` /
+ * `cancelled`) by clearing the "agent is thinking…" indicator without
+ * waiting for the next polling refetch (MUL-192).
+ */
+export interface GlobalChatTaskUpdateEventPayload {
+  global_session_id: string;
+  task_id: string;
+  agent_id: string;
+  status: "dispatched" | "completed" | "failed" | "cancelled" | string;
+  error?: string;
 }
 
 export interface ActivityCreatedPayload {

@@ -11,6 +11,7 @@ import type {
   GlobalChatMessage,
   GlobalChatMessageEventPayload,
   GlobalChatPendingTask,
+  GlobalChatTaskUpdateEventPayload,
 } from "@multica/core/types";
 import { useWSEvent } from "@multica/core/realtime";
 import {
@@ -66,12 +67,10 @@ export function GlobalChatPane({
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // The "is thinking…" surface lives on the user-scope WS channel — the
-  // task lifecycle events (`task:completed` / `task:failed`) don't fan
-  // out for global chat tasks (no workspace_id, see broadcastTaskEvent),
-  // so the agent reply landing as `global_chat:message` is the canonical
-  // "done" signal. Clear pending eagerly + invalidate so the next read
-  // self-heals if the optimistic update raced the daemon.
+  // The "is thinking…" surface lives on the user-scope WS channel. On the
+  // happy path the agent reply landing as `global_chat:message` is the
+  // canonical "done" signal — we clear pending eagerly + invalidate so
+  // the next read self-heals if the optimistic update raced the daemon.
   const handleGlobalMessage = useCallback(
     (payload: unknown) => {
       const evt = payload as GlobalChatMessageEventPayload;
@@ -83,6 +82,22 @@ export function GlobalChatPane({
     [qc],
   );
   useWSEvent("global_chat:message", handleGlobalMessage);
+
+  // Failure / cancel paths produce no `global_chat:message` (no agent
+  // reply ever lands), so the indicator used to stick until the next
+  // pendingTask poll refetched. The backend now emits a per-user lifecycle
+  // event (MUL-192) — clear pending on terminal status so the UI
+  // updates immediately.
+  const handleGlobalTaskUpdate = useCallback(
+    (payload: unknown) => {
+      const evt = payload as GlobalChatTaskUpdateEventPayload;
+      if (evt?.status !== "failed" && evt?.status !== "cancelled") return;
+      qc.setQueryData<GlobalChatPendingTask>(globalChatKeys.pendingTask(), {});
+      qc.invalidateQueries({ queryKey: globalChatKeys.pendingTask() });
+    },
+    [qc],
+  );
+  useWSEvent("global_chat:task_update", handleGlobalTaskUpdate);
 
   // Resolve the default selection once the agent list loads. Re-runs if the
   // list itself changes (refetch) so a removed agent no longer keeps the

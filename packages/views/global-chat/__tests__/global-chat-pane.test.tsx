@@ -479,4 +479,89 @@ describe("GlobalChatPane — pending-task indicator", () => {
     // Default picker resolution lands on Claude Code.
     expect(row.textContent).toContain("Claude Code (terminator-9999)");
   });
+
+  // MUL-192: failure / cancel paths produce no `global_chat:message`, so
+  // the indicator used to stick until the next pendingTask poll. The
+  // backend now emits a per-user `global_chat:task_update` lifecycle ping;
+  // the pane must clear pending on terminal status. Mock returns the
+  // pending row on first read (mount) then empty on subsequent reads
+  // (post-invalidation refetch) — the same shape a real backend exposes
+  // once the failed task is finalized in the queue.
+  it("clears the indicator on global_chat:task_update with status=failed", async () => {
+    getPendingGlobalChatTask
+      .mockResolvedValueOnce({ task_id: "task-5", status: "running", agent_id: CLAUDE_ID })
+      .mockResolvedValue({});
+    const { findByTestId, queryByTestId } = renderPane();
+    await findByTestId("global-chat-pending");
+
+    act(() => {
+      fireWSEvent("global_chat:task_update", {
+        global_session_id: "ses-1",
+        task_id: "task-5",
+        agent_id: CLAUDE_ID,
+        status: "failed",
+        error: "agent crashed",
+      });
+    });
+
+    await waitFor(() => {
+      expect(queryByTestId("global-chat-pending")).toBeNull();
+    });
+  });
+
+  it("clears the indicator on global_chat:task_update with status=cancelled", async () => {
+    getPendingGlobalChatTask
+      .mockResolvedValueOnce({ task_id: "task-6", status: "running", agent_id: CLAUDE_ID })
+      .mockResolvedValue({});
+    const { findByTestId, queryByTestId } = renderPane();
+    await findByTestId("global-chat-pending");
+
+    act(() => {
+      fireWSEvent("global_chat:task_update", {
+        global_session_id: "ses-1",
+        task_id: "task-6",
+        agent_id: CLAUDE_ID,
+        status: "cancelled",
+      });
+    });
+
+    await waitFor(() => {
+      expect(queryByTestId("global-chat-pending")).toBeNull();
+    });
+  });
+
+  it("ignores non-terminal global_chat:task_update statuses (dispatched, completed)", async () => {
+    getPendingGlobalChatTask.mockResolvedValue({
+      task_id: "task-7",
+      status: "running",
+      agent_id: CLAUDE_ID,
+    });
+    const { findByTestId, queryByTestId } = renderPane();
+    await findByTestId("global-chat-pending");
+
+    act(() => {
+      fireWSEvent("global_chat:task_update", {
+        global_session_id: "ses-1",
+        task_id: "task-7",
+        agent_id: CLAUDE_ID,
+        status: "dispatched",
+      });
+    });
+
+    expect(queryByTestId("global-chat-pending")).not.toBeNull();
+
+    // `completed` is also informational here — the canonical "done" signal
+    // for the happy path is the agent's `global_chat:message`, which the
+    // separate `handleGlobalMessage` path already handles.
+    act(() => {
+      fireWSEvent("global_chat:task_update", {
+        global_session_id: "ses-1",
+        task_id: "task-7",
+        agent_id: CLAUDE_ID,
+        status: "completed",
+      });
+    });
+
+    expect(queryByTestId("global-chat-pending")).not.toBeNull();
+  });
 });

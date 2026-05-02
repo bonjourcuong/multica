@@ -835,6 +835,16 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 			failureReason = t.FailureReason.String
 		}
 
+		// Global-chat tasks have no workspace_id by design; publish on the
+		// originating user's channel instead so the per-user "agent is
+		// thinking…" indicator clears on failure (MUL-192). Skip the
+		// workspace publish below — there's no workspace to fan out to.
+		if t.GlobalSessionID.Valid {
+			s.broadcastGlobalTaskEvent(ctx, t, "failed")
+			affectedAgents[util.UUIDToString(t.AgentID)] = t.AgentID
+			continue
+		}
+
 		workspaceID := ""
 		if t.IssueID.Valid {
 			if issue, err := s.Queries.GetIssue(ctx, t.IssueID); err == nil {
@@ -1055,9 +1065,11 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 			Payload:     payload,
 		})
 	case TaskKindGlobal:
-		// Global tasks broadcast on the per-user channel, not the
-		// workspace channel. Implementation lives in MUL-192's
-		// broadcastGlobalTaskEvent helper.
+		// Global tasks broadcast on the per-user channel (MUL-192) —
+		// the runtime-context payload above is workspace-shaped and is
+		// intentionally dropped; the lifecycle ping carries the fields
+		// the global pane needs.
+		s.broadcastGlobalTaskEvent(ctx, task, "dispatched")
 	case TaskKindUnknown:
 		slog.Warn("broadcast task dispatch: task has no recognized entity-type FK",
 			"task_id", util.UUIDToString(task.ID),
@@ -1095,8 +1107,11 @@ func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, 
 			Payload:     payload,
 		})
 	case TaskKindGlobal:
-		// MUL-192: per-user global-chat broadcast lands in a separate
-		// helper. Workspace-channel publish is intentionally skipped.
+		// MUL-192: per-user global-chat lifecycle ping. Maps the
+		// workspace-side event type to a status token the global pane
+		// uses to clear the "agent is thinking…" indicator (MUL-159)
+		// on terminal states without waiting for the next poll.
+		s.broadcastGlobalTaskEvent(ctx, task, globalTaskStatusFor(eventType, task))
 	case TaskKindUnknown:
 		slog.Warn("broadcast task event: task has no recognized entity-type FK",
 			"task_id", util.UUIDToString(task.ID),
@@ -1149,6 +1164,25 @@ func TaskKindOf(task db.AgentTaskQueue) TaskKind {
 		return TaskKindGlobal
 	default:
 		return TaskKindUnknown
+	}
+}
+
+// globalTaskStatusFor maps a workspace-side lifecycle event type to the
+// terminal-state token used in `GlobalChatTaskUpdatePayload.Status`. Falls
+// back to the row's current status so an unknown event type still emits a
+// meaningful payload instead of an empty string.
+func globalTaskStatusFor(eventType string, task db.AgentTaskQueue) string {
+	switch eventType {
+	case protocol.EventTaskDispatch:
+		return "dispatched"
+	case protocol.EventTaskCompleted:
+		return "completed"
+	case protocol.EventTaskFailed:
+		return "failed"
+	case protocol.EventTaskCancelled:
+		return "cancelled"
+	default:
+		return task.Status
 	}
 }
 
@@ -1224,12 +1258,60 @@ func (s *TaskService) broadcastChatDone(ctx context.Context, task db.AgentTaskQu
 			},
 		})
 	case TaskKindGlobal:
-		// MUL-192: handled by per-user global-chat broadcast helper.
+		// MUL-192: chat:done has no global-chat parallel — the per-user
+		// `global_chat:message` published by writeGlobalChatAgentReply is
+		// already the authoritative "agent reply landed" signal. Emit
+		// the lifecycle ping defensively so a future caller funnelling
+		// global tasks here can't regress to a silent workspace-key
+		// drop. Today this branch is unreachable: CompleteTask gates
+		// broadcastChatDone on task.ChatSessionID.Valid.
+		s.broadcastGlobalTaskEvent(ctx, task, "completed")
 	case TaskKindUnknown:
 		slog.Warn("broadcast chat done: task has no recognized entity-type FK",
 			"task_id", util.UUIDToString(task.ID),
 		)
 	}
+}
+
+// broadcastGlobalTaskEvent emits a global-chat lifecycle event on the
+// originating user's per-user channel for tasks where GlobalSessionID is
+// set. ResolveTaskWorkspaceID returns "" for global tasks (workspace_id
+// is NULL by design — see MUL-182) and every workspace-keyed broadcast
+// helper used to silently drop the event, leaving the global-chat
+// "agent is thinking…" indicator (MUL-159) stuck on failure / cancel
+// until the next polling refetch caught up. Mirrors the per-user publish
+// shape writeGlobalChatAgentReply already uses for the happy path.
+func (s *TaskService) broadcastGlobalTaskEvent(ctx context.Context, task db.AgentTaskQueue, status string) {
+	if !task.GlobalSessionID.Valid {
+		return
+	}
+	sess, err := s.Queries.GetGlobalChatSession(ctx, task.GlobalSessionID)
+	if err != nil {
+		slog.Warn("global task event: lookup session failed",
+			"task_id", util.UUIDToString(task.ID),
+			"global_session_id", util.UUIDToString(task.GlobalSessionID),
+			"status", status,
+			"error", err,
+		)
+		return
+	}
+	errMsg := ""
+	if task.Error.Valid {
+		errMsg = task.Error.String
+	}
+	s.Bus.Publish(events.Event{
+		Type:      protocol.EventGlobalChatTaskUpdate,
+		UserID:    util.UUIDToString(sess.UserID),
+		ActorType: "system",
+		TaskID:    util.UUIDToString(task.ID),
+		Payload: protocol.GlobalChatTaskUpdatePayload{
+			GlobalSessionID: util.UUIDToString(task.GlobalSessionID),
+			TaskID:          util.UUIDToString(task.ID),
+			AgentID:         util.UUIDToString(task.AgentID),
+			Status:          status,
+			Error:           errMsg,
+		},
+	})
 }
 
 func (s *TaskService) broadcastIssueUpdated(issue db.Issue) {
