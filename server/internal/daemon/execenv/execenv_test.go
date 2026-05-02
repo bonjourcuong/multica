@@ -1738,3 +1738,86 @@ func TestInjectRuntimeConfigMentionLoopHardening(t *testing.T) {
 		}
 	})
 }
+
+// TestInjectRuntimeConfigGlobalChat covers the global-chat branch: no
+// workspace, no repos, no issue. The agent must be told (a) it's in global
+// chat, (b) responses go via the global chat API not the workspace-comment
+// API, and (c) workspace fan-out is via plain-text `@workspace[:agent]`
+// mentions that the server dispatches automatically. See MUL-157.
+func TestInjectRuntimeConfigGlobalChat(t *testing.T) {
+	t.Parallel()
+	dir := t.TempDir()
+
+	ctx := TaskContextForEnv{
+		GlobalSessionID: "global-session-1",
+		AgentName:       "Cuong Pho",
+		AgentID:         "agent-cuong-pho",
+	}
+
+	if err := InjectRuntimeConfig(dir, "claude", ctx); err != nil {
+		t.Fatalf("InjectRuntimeConfig failed: %v", err)
+	}
+	data, err := os.ReadFile(filepath.Join(dir, "CLAUDE.md"))
+	if err != nil {
+		t.Fatalf("read CLAUDE.md: %v", err)
+	}
+	s := string(data)
+
+	// (a) the user is in a global chat — no workspace/repo/issue context
+	for _, want := range []string{
+		"global chat mode",
+		"not tied to any Multica workspace or issue",
+		"no repos",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("global-chat CLAUDE.md missing %q\n---\n%s", want, s)
+		}
+	}
+
+	// (b) responses go via the global chat API, not workspace-comment API
+	for _, want := range []string{
+		"multica global-chat reply",
+		"Do NOT use `multica issue comment add`",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("global-chat CLAUDE.md missing %q\n---\n%s", want, s)
+		}
+	}
+
+	// (c) workspace fan-out via @workspace[:agent] mentions
+	for _, want := range []string{
+		"@<workspace-slug>",
+		"@<workspace-slug>:<agent-name>",
+		"server parses these mentions",
+		"dispatches",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("global-chat CLAUDE.md missing %q\n---\n%s", want, s)
+		}
+	}
+
+	// Output section must steer the agent to global-chat reply, not issue comment
+	if !strings.Contains(s, "Final results MUST be delivered via `multica global-chat reply`") {
+		t.Errorf("global-chat CLAUDE.md Output section missing global-chat reply directive\n---\n%s", s)
+	}
+	if strings.Contains(s, "Final results MUST be delivered via `multica issue comment add`") {
+		t.Errorf("global-chat CLAUDE.md must not direct the agent to `multica issue comment add`\n---\n%s", s)
+	}
+
+	// Workflow guidance for the workspace chat / comment-trigger / autopilot
+	// branches must NOT bleed into the global-chat output.
+	for _, absent := range []string{
+		"You are in chat mode.",
+		"This task was triggered by a NEW comment.",
+		"Autopilot in run-only mode",
+	} {
+		if strings.Contains(s, absent) {
+			t.Errorf("global-chat CLAUDE.md must not contain %q (other branch leaked)\n---\n%s", absent, s)
+		}
+	}
+
+	// Agent identity must still be emitted so the orchestrator knows who it is.
+	if !strings.Contains(s, "Cuong Pho") {
+		t.Errorf("global-chat CLAUDE.md missing agent identity\n---\n%s", s)
+	}
+}

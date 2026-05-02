@@ -124,7 +124,18 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 
 	b.WriteString("### Workflow\n\n")
 
-	if ctx.ChatSessionID != "" {
+	if ctx.GlobalSessionID != "" {
+		// Global-chat task: orchestrator mode. No workspace, no repos, no issue —
+		// just the running user-level conversation. Branch is checked BEFORE
+		// ChatSessionID so a global task with both fields set still routes to
+		// the global path (mirroring BuildPrompt's ordering).
+		b.WriteString("**You are in global chat mode.** This is a user-level conversation, not tied to any Multica workspace or issue.\n\n")
+		b.WriteString("- There is no assigned workspace, no repos, no issue — just the running conversation. Do NOT run `multica issue ...`, `multica workspace ...`, `multica autopilot ...`, or `multica repo checkout` for this task. Workspace-scoped commands listed above do not apply here.\n")
+		b.WriteString("- **Reply via the global chat API, not the workspace-comment API.** Your answer must go back to the user's global chat pane. Use `multica global-chat reply --content \"...\"` (or `--content-stdin` with a HEREDOC for multi-line replies) to deliver the response. Do NOT use `multica issue comment add` — there is no issue.\n")
+		b.WriteString("- **To fan out to a workspace, mention it in plain text as `@<workspace-slug>` or `@<workspace-slug>:<agent-name>`** anywhere in your reply body. The server parses these mentions on POST and dispatches the message into each target workspace's mirror chat session automatically — you do NOT need to call any per-workspace API yourself. Examples: `@fuchsia-biz can you draft the brief?` (any agent), `@multica-fork:Tony please ship MUL-157` (specific agent).\n")
+		b.WriteString("- These plain-text `@workspace[:agent]` mentions are distinct from the markdown `mention://...` links described in the Mentions section below; the latter only make sense inside a workspace and have no effect in global chat.\n")
+		b.WriteString("- Keep responses concise and direct.\n\n")
+	} else if ctx.ChatSessionID != "" {
 		// Chat task: interactive assistant mode
 		b.WriteString("**You are in chat mode.** A user is messaging you directly in a chat window.\n\n")
 		b.WriteString("- Respond conversationally and helpfully to the user's message\n")
@@ -238,7 +249,11 @@ func buildMetaSkillContent(provider string, ctx TaskContextForEnv) string {
 	b.WriteString("do NOT attempt to work around it. Instead, post a comment mentioning the workspace owner to request the missing functionality.\n\n")
 
 	b.WriteString("## Output\n\n")
-	if ctx.AutopilotRunID != "" {
+	if ctx.GlobalSessionID != "" {
+		b.WriteString("⚠️ **Final results MUST be delivered via `multica global-chat reply`.** This task has no Multica issue and no workspace context — `multica issue comment add` would fail. The user only sees what is posted to their global chat pane via the reply command.\n\n")
+		b.WriteString("Keep replies concise and direct — answer the user's question, then stop.\n")
+		b.WriteString("To fan out to a workspace, embed `@<workspace-slug>` or `@<workspace-slug>:<agent-name>` in the reply body; the server dispatches each mention into the target workspace automatically.\n")
+	} else if ctx.AutopilotRunID != "" {
 		b.WriteString("This is a run-only autopilot task, so there may be no issue comment to post. Your final assistant output is captured automatically as the autopilot run result. Keep it concise and state the outcome.\n")
 	} else {
 		b.WriteString("⚠️ **Final results MUST be delivered via `multica issue comment add`.** The user does NOT see your terminal output, assistant chat text, or run logs — only comments on the issue. A task that finishes without a result comment is invisible to the user, even if the work itself was correct.\n\n")
