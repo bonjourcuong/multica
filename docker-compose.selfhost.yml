@@ -49,11 +49,14 @@ services:
     environment:
       DATABASE_URL: postgres://${POSTGRES_USER:-multica}:${POSTGRES_PASSWORD:-multica}@postgres:5432/${POSTGRES_DB:-multica}?sslmode=disable
       PORT: "8080"
-      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      # JWT_SECRET and RESEND_API_KEY are mounted as Docker file-backed secrets
+      # under /run/secrets/ (see top-level `secrets:` block below). The server
+      # resolves them via secrets.FromFileOrEnv (MUL-176), which prefers the
+      # file over the env var. Keeping the values out of `environment:` removes
+      # them from `docker inspect`'s Config.Env array (audit MUL-172, F4 / MUL-184).
       MULTICA_PKM_ROOT: ${MULTICA_PKM_ROOT:-}
       FRONTEND_ORIGIN: ${FRONTEND_ORIGIN:-http://localhost:3000}
       CORS_ALLOWED_ORIGINS: ${CORS_ALLOWED_ORIGINS:-}
-      RESEND_API_KEY: ${RESEND_API_KEY:-}
       RESEND_FROM_EMAIL: ${RESEND_FROM_EMAIL:-noreply@multica.ai}
       GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
       GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
@@ -66,9 +69,12 @@ services:
       COOKIE_DOMAIN: ${COOKIE_DOMAIN:-}
       APP_ENV: ${APP_ENV:-production}
       MULTICA_APP_URL: ${MULTICA_APP_URL:-http://localhost:3000}
-      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}                                     
-      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}                                     
-      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-} 
+      ALLOW_SIGNUP: ${ALLOW_SIGNUP:-true}
+      ALLOWED_EMAILS: ${ALLOWED_EMAILS:-}
+      ALLOWED_EMAIL_DOMAINS: ${ALLOWED_EMAIL_DOMAINS:-}
+    secrets:
+      - jwt_secret
+      - resend_api_key
     restart: unless-stopped
 
   frontend:
@@ -84,3 +90,16 @@ services:
 volumes:
   pgdata:
   backend_uploads:
+
+# File-backed secrets (compose v2). Each value is read from the compose
+# process environment (typically `.env`) at deploy time and mounted into the
+# backend container at /run/secrets/<name>. The value is NOT injected into
+# the service's environment, so `docker inspect <container>` no longer
+# exposes it via Config.Env (audit MUL-172, F4). The server reads each
+# secret with secrets.FromFileOrEnv (MUL-176) — file path wins, env var is
+# the fallback for non-Docker runs.
+secrets:
+  jwt_secret:
+    environment: JWT_SECRET
+  resend_api_key:
+    environment: RESEND_API_KEY
