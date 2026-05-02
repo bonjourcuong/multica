@@ -10,7 +10,10 @@ type Mention struct {
 
 // MentionRe matches [@Label](mention://type/id) or [Label](mention://issue/id) in markdown.
 // The @ prefix is optional to support issue mentions which use [MUL-123](mention://issue/...).
-var MentionRe = regexp.MustCompile(`\[@?[^\]]*\]\(mention://(member|agent|issue|all)/([0-9a-fA-F-]+|all)\)`)
+// The display text supports one level of nested brackets so agent labels like
+// "QA Bruce [MF]" parse correctly: `(?:[^\[\]]|\[[^\[\]]*\])*` accepts any non-bracket
+// run, optionally interleaved with a single-level `[...]` group.
+var MentionRe = regexp.MustCompile(`\[@?(?:[^\[\]]|\[[^\[\]]*\])*\]\(mention://(member|agent|issue|all)/([0-9a-fA-F-]+|all)\)`)
 
 // IsMentionAll returns true if the mention is an @all mention.
 func (m Mention) IsMentionAll() bool {

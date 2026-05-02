@@ -67,6 +67,18 @@ func TestCommentMentionsOthersButNotAssignee(t *testing.T) {
 			want:    true,
 		},
 		{
+			// Regression for MUL-166: agent display names with bracketed suffixes
+			// (e.g. "QA Bruce [MF]") must still parse and route correctly.
+			name:    "mentions other agent with bracketed name → suppress",
+			content: fmt.Sprintf("[@QA Bruce [MF]](mention://agent/%s) please review", otherAgentID),
+			want:    true,
+		},
+		{
+			name:    "mentions assignee with bracketed name → allow trigger",
+			content: fmt.Sprintf("[@Backend Tony [MF]](mention://agent/%s) please fix", agentAssigneeID),
+			want:    false,
+		},
+		{
 			name:    "mentions other member only → suppress",
 			content: fmt.Sprintf("[@Bob](mention://member/%s) take a look", memberID),
 			want:    true,
