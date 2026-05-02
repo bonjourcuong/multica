@@ -1617,3 +1617,138 @@ func TestCompleteTask_CommentTriggered_SkipsSynthesisWhenAgentAlreadyCommented(t
 		t.Fatalf("expected 1 agent comment (the agent's own reply), got %d — synthesis duplicated", count)
 	}
 }
+
+// MUL-182: regression test for the daemon task-lifecycle 404 on global
+// chat tasks. ResolveTaskWorkspaceID has no branch for global_session_id,
+// so before the fix every /start, /complete, /fail, /progress, /usage,
+// /messages call from the daemon hit the catch-all `wsID == ""` 404 path
+// in requireDaemonTaskAccess. Tasks never moved out of `dispatched`, the
+// global chat reply never landed, and the run timed out at the 5-minute
+// sweeper. The fix bypasses the workspace check for global tasks and
+// gates on runtime ownership instead — same isolation guarantee as the
+// claim path (ClaimTaskByRuntime).
+func TestRequireDaemonTaskAccess_GlobalChatTask_RuntimeOwnerSucceeds(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+	ctx := context.Background()
+
+	// Resolve the runtime the global agent is bound to. The fixture
+	// inserts the runtime under testWorkspaceID, so the legitimate
+	// daemon token below uses that workspace.
+	var runtimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT runtime_id::text FROM agent WHERE id = $1`,
+		f.ClaudeCodeAgentID,
+	).Scan(&runtimeID); err != nil {
+		t.Fatalf("setup: get agent runtime_id: %v", err)
+	}
+
+	// Global chat task as enqueued by EnqueueGlobalChatTask: only
+	// global_session_id is set; issue_id, chat_session_id and
+	// autopilot_run_id are all NULL.
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, status, priority, global_session_id
+		)
+		VALUES ($1, $2, 'dispatched', 0, $3)
+		RETURNING id
+	`, f.ClaudeCodeAgentID, runtimeID, f.GlobalSessionID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create global chat task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	// Same workspace as the runtime → daemon owns it → /start must 200.
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/start", nil,
+		testWorkspaceID, "legit-daemon")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("taskId", taskID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.StartTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("StartTask for global chat task: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&status); err != nil {
+		t.Fatalf("post-check: read task status: %v", err)
+	}
+	if status != "running" {
+		t.Fatalf("expected task status 'running' after StartTask, got %q", status)
+	}
+
+	// /complete must also succeed for the same daemon — the bug
+	// affected every lifecycle endpoint, not just /start.
+	w = httptest.NewRecorder()
+	req = newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/complete",
+		map[string]any{"output": "global agent reply"},
+		testWorkspaceID, "legit-daemon")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.CompleteTask(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("CompleteTask for global chat task: expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// Companion of the above: a daemon token bound to a different workspace
+// than the global agent's runtime must NOT be able to drive the task.
+// Runtime ownership is the only isolation guarantee for global tasks
+// (they have no workspace_id of their own); a foreign-workspace daemon
+// token must still 404.
+func TestRequireDaemonTaskAccess_GlobalChatTask_ForeignDaemonRejected(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+	ctx := context.Background()
+
+	var runtimeID string
+	if err := testPool.QueryRow(ctx,
+		`SELECT runtime_id::text FROM agent WHERE id = $1`,
+		f.ClaudeCodeAgentID,
+	).Scan(&runtimeID); err != nil {
+		t.Fatalf("setup: get agent runtime_id: %v", err)
+	}
+
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, status, priority, global_session_id
+		)
+		VALUES ($1, $2, 'dispatched', 0, $3)
+		RETURNING id
+	`, f.ClaudeCodeAgentID, runtimeID, f.GlobalSessionID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create global chat task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	// Foreign workspace UUID — no runtime in this workspace.
+	const foreignWorkspaceID = "00000000-0000-0000-0000-000000000182"
+
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/start", nil,
+		foreignWorkspaceID, "attacker-daemon")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("taskId", taskID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.StartTask(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("StartTask with foreign-workspace daemon: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var status string
+	if err := testPool.QueryRow(ctx, `SELECT status FROM agent_task_queue WHERE id = $1`, taskID).Scan(&status); err != nil {
+		t.Fatalf("post-check: read task status: %v", err)
+	}
+	if status != "dispatched" {
+		t.Fatalf("foreign daemon must not start the task; expected status 'dispatched', got %q", status)
+	}
+}

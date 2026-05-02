@@ -64,11 +64,34 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 }
 
 // requireDaemonTaskAccess looks up a task and verifies the caller owns its workspace.
+//
+// Global chat tasks (V3, MUL-137) have no workspace by design — every
+// workspace-side FK on agent_task_queue (issue_id, chat_session_id,
+// autopilot_run_id) is NULL — so ResolveTaskWorkspaceID returns "" for
+// them. Falling through the workspace check would 404 every lifecycle
+// call (start, complete, fail, progress, heartbeat, …) and the chat
+// would silently time out at the 5-minute sweeper. Bypass the workspace
+// check in that case and gate on runtime ownership instead: the daemon
+// must own the runtime the task's agent is bound to. This is the same
+// isolation guarantee ClaimTaskByRuntime already enforces for the
+// claim endpoint (MUL-165, commit b20a9aff).
 func (h *Handler) requireDaemonTaskAccess(w http.ResponseWriter, r *http.Request, taskID string) (db.AgentTaskQueue, bool) {
 	task, err := h.Queries.GetAgentTask(r.Context(), parseUUID(taskID))
 	if err != nil {
 		writeError(w, http.StatusNotFound, "task not found")
 		return db.AgentTaskQueue{}, false
+	}
+
+	if task.GlobalSessionID.Valid {
+		agent, err := h.Queries.GetAgent(r.Context(), task.AgentID)
+		if err != nil || !agent.RuntimeID.Valid {
+			writeError(w, http.StatusNotFound, "task not found")
+			return db.AgentTaskQueue{}, false
+		}
+		if _, ok := h.requireDaemonRuntimeAccess(w, r, uuidToString(agent.RuntimeID)); !ok {
+			return db.AgentTaskQueue{}, false
+		}
+		return task, true
 	}
 
 	wsID := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
