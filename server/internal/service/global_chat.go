@@ -13,6 +13,7 @@ import (
 
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/mention"
+	"github.com/multica-ai/multica/server/internal/util"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 )
@@ -50,6 +51,13 @@ const claudeCodeGlobalAgentRuntimeConfig = `{"working_dir":"/root"}`
 // default with a WARN log so a typo can't brick provisioning.
 const claudeCodeGlobalAgentMcpEnvVar = "MULTICA_CLAUDE_CODE_GLOBAL_AGENT_MCP_CONFIG"
 
+// globalAgentRuntimeIDEnvVar is the env var JARVIS sets to pin the twin's
+// runtime to a specific row when the deploy has more than one local
+// runtime. When empty / unset, ensureGlobalAgent falls back to the
+// canonical local runtime resolved by name (ClaudeCodeGlobalRuntimeName).
+// Documented in MUL-156.
+const globalAgentRuntimeIDEnvVar = "MULTICA_GLOBAL_AGENT_RUNTIME_ID"
+
 // defaultClaudeCodeGlobalAgentMcpConfig mirrors the two MCPs Cuong
 // already uses on his local Claude Code (honcho self-hosted + jcodemunch
 // for code exploration). JARVIS confirms the shape and can override via
@@ -71,6 +79,7 @@ type GlobalChatQueries interface {
 	CreateGlobalAgent(ctx context.Context, arg db.CreateGlobalAgentParams) (db.Agent, error)
 
 	GetAgentRuntimeByOwnerAndName(ctx context.Context, arg db.GetAgentRuntimeByOwnerAndNameParams) (db.AgentRuntime, error)
+	GetAgentRuntime(ctx context.Context, id pgtype.UUID) (db.AgentRuntime, error)
 
 	GetUser(ctx context.Context, id pgtype.UUID) (db.User, error)
 }
@@ -383,13 +392,30 @@ func (s *GlobalChatService) ensureGlobalAgent(ctx context.Context, userID pgtype
 		displayName = fmt.Sprintf("%s (%s)", GlobalAgentName, user.Name)
 	}
 
+	// Bind the twin to a local runtime so a global chat task targeted at
+	// it can actually be claimed by the daemon. Resolution order
+	// (MUL-156):
+	//   1. MULTICA_GLOBAL_AGENT_RUNTIME_ID env override (operator-pinned).
+	//   2. The canonical local runtime resolved by (owner_id, name) —
+	//      same row EnsureClaudeCodeGlobalAgent uses, kept identical so
+	//      both global agents share one daemon.
+	// When neither resolves we fall back to the legacy cloud / NULL
+	// shape: the twin is still useful for cross-workspace dispatch fan-
+	// out, just without daemon-driven replies until a runtime registers.
+	runtimeMode := "cloud"
+	runtimeID := pgtype.UUID{}
+	if rt, ok := s.resolveTwinRuntime(ctx, userID); ok {
+		runtimeMode = "local"
+		runtimeID = pgtype.UUID{Bytes: rt.ID.Bytes, Valid: true}
+	}
+
 	agent, err := s.q.CreateGlobalAgent(ctx, db.CreateGlobalAgentParams{
 		Name:               displayName,
 		Description:        "Global orchestrator (digital twin).",
 		AvatarUrl:          pgtype.Text{},
-		RuntimeMode:        "cloud",
+		RuntimeMode:        runtimeMode,
 		RuntimeConfig:      []byte("{}"),
-		RuntimeID:          pgtype.UUID{},
+		RuntimeID:          runtimeID,
 		Visibility:         "private",
 		MaxConcurrentTasks: 1,
 		OwnerID:            userID,
@@ -404,6 +430,33 @@ func (s *GlobalChatService) ensureGlobalAgent(ctx context.Context, userID pgtype
 		return db.Agent{}, fmt.Errorf("create global agent: %w", err)
 	}
 	return agent, nil
+}
+
+// resolveTwinRuntime picks the runtime row the twin should bind to.
+// Returns ok=false when no runtime is available; callers fall back to a
+// runtime-less twin (cloud / NULL) which preserves cross-workspace
+// dispatch but blocks daemon-driven replies until a runtime registers.
+func (s *GlobalChatService) resolveTwinRuntime(ctx context.Context, userID pgtype.UUID) (db.AgentRuntime, bool) {
+	if raw := os.Getenv(globalAgentRuntimeIDEnvVar); raw != "" {
+		if id := util.ParseUUID(raw); id.Valid {
+			if rt, err := s.q.GetAgentRuntime(ctx, id); err == nil {
+				return rt, true
+			} else {
+				slog.Warn("global agent runtime env override not resolvable; falling back to canonical local runtime",
+					"env_var", globalAgentRuntimeIDEnvVar, "runtime_id", raw, "error", err)
+			}
+		} else {
+			slog.Warn("global agent runtime env override is not a valid UUID; falling back to canonical local runtime",
+				"env_var", globalAgentRuntimeIDEnvVar, "value", raw)
+		}
+	}
+	if rt, err := s.q.GetAgentRuntimeByOwnerAndName(ctx, db.GetAgentRuntimeByOwnerAndNameParams{
+		OwnerID: userID,
+		Name:    ClaudeCodeGlobalRuntimeName,
+	}); err == nil {
+		return rt, true
+	}
+	return db.AgentRuntime{}, false
 }
 
 func (s *GlobalChatService) publishMessage(userID pgtype.UUID, msg db.GlobalChatMessage) {

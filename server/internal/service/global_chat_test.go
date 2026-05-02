@@ -140,6 +140,15 @@ func (f *fakeGlobalChat) GetAgentRuntimeByOwnerAndName(ctx context.Context, arg 
 	return db.AgentRuntime{}, pgx.ErrNoRows
 }
 
+func (f *fakeGlobalChat) GetAgentRuntime(ctx context.Context, id pgtype.UUID) (db.AgentRuntime, error) {
+	for _, rt := range f.runtimes {
+		if rt.ID == id {
+			return rt, nil
+		}
+	}
+	return db.AgentRuntime{}, pgx.ErrNoRows
+}
+
 func (f *fakeGlobalChat) GetUser(ctx context.Context, id pgtype.UUID) (db.User, error) {
 	if u, ok := f.users[uuidValue(id)]; ok {
 		return u, nil
@@ -199,7 +208,43 @@ func TestEnsureSession_BootstrapsAgentAndSession(t *testing.T) {
 		t.Error("expected agent bound to user")
 	}
 	if f.createParams[0].RuntimeID.Valid {
-		t.Error("expected runtime-less twin (RuntimeID.Valid = false); migration 061 keeps agent.runtime_id nullable for this case (MUL-141)")
+		t.Error("expected runtime-less twin (RuntimeID.Valid = false) when no local runtime is registered; migration 061 keeps agent.runtime_id nullable for this fallback (MUL-141)")
+	}
+	if f.createParams[0].RuntimeMode != "cloud" {
+		t.Errorf("expected RuntimeMode=cloud fallback when no local runtime exists, got %q", f.createParams[0].RuntimeMode)
+	}
+}
+
+// MUL-156: when the user already has a local runtime registered, the twin
+// must bind to it on bootstrap so the daemon can claim global chat tasks
+// targeted at the twin (the V1 cloud / NULL shape was unclaimable).
+func TestEnsureSession_TwinBindsToLocalRuntime(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	rt := f.seedClaudeRuntime(user)
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, user); err != nil {
+		t.Fatalf("EnsureSession: %v", err)
+	}
+
+	var twin *db.CreateGlobalAgentParams
+	for i := range f.createParams {
+		if strings.HasPrefix(f.createParams[i].Name, GlobalAgentName) {
+			twin = &f.createParams[i]
+			break
+		}
+	}
+	if twin == nil {
+		t.Fatalf("twin not created; CreateGlobalAgent calls = %d", len(f.createParams))
+	}
+	if twin.RuntimeMode != "local" {
+		t.Errorf("twin RuntimeMode = %q, want local", twin.RuntimeMode)
+	}
+	if !twin.RuntimeID.Valid || twin.RuntimeID != rt.ID {
+		t.Errorf("twin RuntimeID = %v, want %v (canonical local runtime)", twin.RuntimeID, rt.ID)
 	}
 }
 
