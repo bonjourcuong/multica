@@ -12,7 +12,9 @@ name: multica
 
 services:
   postgres:
-    image: pgvector/pgvector:pg17
+    # Pinned by digest (audit MUL-175 / F3). Tag is informational; the digest is
+    # what Docker pulls. To rotate: see docs/runbook/image-pinning.md.
+    image: pgvector/pgvector:pg17@sha256:494dff7e67e7bc2c826b94c331364978d145ebb86fd338154138b084223b7f67
     environment:
       POSTGRES_DB: ${POSTGRES_DB:-multica}
       POSTGRES_USER: ${POSTGRES_USER:-multica}

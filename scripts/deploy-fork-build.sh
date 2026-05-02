@@ -83,7 +83,30 @@ docker compose version >/dev/null 2>&1 || { echo "ERROR: 'docker compose' plugin
 if [ ! -f "$ENV_FILE" ]; then
   echo "WARN: $ENV_FILE not found in $REPO_ROOT — migration dry-run will likely fail."
   echo "      Copy .env.example to .env and fill in king-postgres credentials before deploy."
+else
+  # Harden permissions on .env every run (MUL-175 / F5). The file holds JWT and
+  # Resend secrets; mode 0600 + no ACL means only root can read it. Idempotent:
+  # re-running on an already-tight file is a no-op. setfacl -b clears any ACL
+  # without touching the base mode.
+  current_mode="$(stat -c '%a' "$ENV_FILE")"
+  if [ "$current_mode" != "600" ]; then
+    echo "    Tightening $ENV_FILE perms: $current_mode -> 600"
+    chmod 0600 "$ENV_FILE"
+  fi
+  if command -v setfacl >/dev/null 2>&1 && getfacl --absolute-names -p "$ENV_FILE" 2>/dev/null | grep -qE '^user:[^:]+:'; then
+    echo "    Clearing extended ACLs on $ENV_FILE"
+    setfacl -b "$ENV_FILE"
+  fi
 fi
+
+# ---------- Image tag wiring (MUL-175 / F3) ----------
+# Pin MULTICA_IMAGE_TAG to the current HEAD short SHA so the built images are
+# named ${MULTICA_BACKEND_IMAGE}:<sha> and ${MULTICA_WEB_IMAGE}:<sha> instead
+# of the mutable :latest. `export` so docker compose picks it up. .env still
+# carries a default for `up -d` rollbacks; this export overrides it for build.
+HEAD_SHA="$(git rev-parse --short HEAD)"
+export MULTICA_IMAGE_TAG="$HEAD_SHA"
+echo "    MULTICA_IMAGE_TAG     = $MULTICA_IMAGE_TAG (auto-pinned to HEAD)"
 
 if ! docker ps --format '{{.Names}}' | grep -qx "$POSTGRES_CONTAINER"; then
   echo "WARN: container '$POSTGRES_CONTAINER' is not running."
@@ -200,20 +223,24 @@ fi
 cat <<EOF
 
 Step A. Apply migrations + start the fork stack (single command — the backend
-        entrypoint runs migrate-up before booting the server):
+        entrypoint runs migrate-up before booting the server). Reuse the same
+        MULTICA_IMAGE_TAG that step 2 just built so the runtime image tag
+        resolves to ${MULTICA_BACKEND_IMAGE:-multica-backend-fork}:$HEAD_SHA:
 
   cd $REPO_ROOT
-  docker compose $UP_FLAGS up -d
+  MULTICA_IMAGE_TAG=$HEAD_SHA docker compose $UP_FLAGS up -d
 
-Step B. Verify the deploy is healthy (give the backend ~30s to migrate + boot):
+Step B. Verify the deploy is healthy (give the backend ~30s to migrate + boot,
+        and look for "(healthy)" on every multica-* container — added in MUL-175):
 
-  docker ps --filter name=multica
+  docker ps --filter name=multica --format 'table {{.Names}}\t{{.Status}}'
   curl -sS $HEALTHCHECK_URL && echo
 
-Rollback (revert to upstream GHCR images, no fork build):
+Rollback (revert to the previously-running SHA — replace <prev-sha> with the
+tag from \`docker images multica-backend-fork\`):
 
   cd $REPO_ROOT
-  docker compose $ROLLBACK_FLAGS up -d
+  MULTICA_IMAGE_TAG=<prev-sha> docker compose $ROLLBACK_FLAGS up -d
 
 Notes:
   - Migrations are applied by the backend entrypoint (./migrate up). The plan
