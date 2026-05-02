@@ -213,10 +213,16 @@ func (h *Handler) InitiateListModels(w http.ResponseWriter, r *http.Request) {
 
 // GetModelListRequest returns the status of a model list request.
 func (h *Handler) GetModelListRequest(w http.ResponseWriter, r *http.Request) {
+	runtimeID := chi.URLParam(r, "runtimeId")
+
+	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
+		return
+	}
+
 	requestID := chi.URLParam(r, "requestId")
 
 	req := h.ModelListStore.Get(requestID)
-	if req == nil {
+	if req == nil || req.RuntimeID != runtimeID {
 		writeError(w, http.StatusNotFound, "request not found")
 		return
 	}

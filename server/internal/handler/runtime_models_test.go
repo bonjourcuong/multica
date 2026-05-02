@@ -2,12 +2,41 @@ package handler
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+// createModelListTestRuntime inserts an online runtime in the given workspace
+// and registers cleanup. Each call returns a fresh runtime ID so callers do
+// not collide on per-runtime store guards.
+func createModelListTestRuntime(t *testing.T, workspaceID, label string) string {
+	t.Helper()
+
+	daemonID := fmt.Sprintf("model-test-daemon-%s-%d", label, time.Now().UnixNano())
+	name := fmt.Sprintf("Model Test Runtime %s %d", label, time.Now().UnixNano())
+
+	var runtimeID string
+	if err := testPool.QueryRow(context.Background(), `
+		INSERT INTO agent_runtime (
+			workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at
+		)
+		VALUES ($1, $2, $3, 'cloud', 'claude', 'online', $4, '{}'::jsonb, now())
+		RETURNING id
+	`, workspaceID, daemonID, name, "Model-list test runtime").Scan(&runtimeID); err != nil {
+		t.Fatalf("create runtime: %v", err)
+	}
+
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM agent_runtime WHERE id = $1`, runtimeID)
+	})
+
+	return runtimeID
+}
 
 // TestModelListStore_RunningRequestTimesOut pins the escape hatch for
 // requests that were claimed (PopPending → Running) but whose result was
@@ -118,5 +147,106 @@ func TestReportModelListResult_DecodesJSONBodyDefault(t *testing.T) {
 	}
 	if !body.Models[0].Default {
 		t.Errorf("default flag lost on model[0]: %+v", body.Models[0])
+	}
+}
+
+// TestGetModelListRequest_CrossWorkspace_Returns404 verifies that
+// GetModelListRequest validates the runtimeId URL param against the caller's
+// workspace. A member of workspace A cannot poll a model-list request that
+// belongs to a runtime in workspace B, even if they happen to know (or guess)
+// the unguessable v4 request ID.
+//
+// Symmetric with the access check ReportModelListResult already enforces, and
+// mirrors the GetLocalSkillListRequest / GetUpdate (MUL-194) pattern.
+func TestGetModelListRequest_CrossWorkspace_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+	var foreignWorkspaceID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO workspace (name, slug, description, issue_prefix)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id
+	`, "Model IDOR Foreign", "model-idor-foreign", "Cross-tenant model-list IDOR test", "MIF").Scan(&foreignWorkspaceID); err != nil {
+		t.Fatalf("setup: create foreign workspace: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, foreignWorkspaceID)
+	})
+
+	foreignRuntimeID := createModelListTestRuntime(t, foreignWorkspaceID, "model-foreign")
+
+	req := testHandler.ModelListStore.Create(foreignRuntimeID)
+
+	// testUserID belongs only to testWorkspaceID, so requireDaemonRuntimeAccess
+	// must reject a probe against the foreign runtime — even when armed with
+	// the real request ID.
+	w := httptest.NewRecorder()
+	httpReq := withURLParams(
+		newRequest(http.MethodGet, "/api/runtimes/"+foreignRuntimeID+"/models/"+req.ID, nil),
+		"runtimeId", foreignRuntimeID,
+		"requestId", req.ID,
+	)
+	testHandler.GetModelListRequest(w, httpReq)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GetModelListRequest cross-workspace: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetModelListRequest_RuntimeMismatch_Returns404 covers the second leg of
+// the access check: the runtimeId in the URL belongs to the caller's
+// workspace, but the model-list request was created for a different runtime.
+// Without the `req.RuntimeID != runtimeID` check, the handler would leak the
+// status of an unrelated request to anyone who can guess the request ID.
+func TestGetModelListRequest_RuntimeMismatch_Returns404(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	// Two runtimes in the SAME workspace. Caller is a member; the access
+	// check passes for either runtime, so only the RuntimeID match prevents
+	// the leak.
+	requestRuntimeID := createModelListTestRuntime(t, testWorkspaceID, "model-mismatch-req")
+	otherRuntimeID := createModelListTestRuntime(t, testWorkspaceID, "model-mismatch-other")
+
+	// Request belongs to requestRuntimeID, but the caller addresses it
+	// through otherRuntimeID.
+	req := testHandler.ModelListStore.Create(requestRuntimeID)
+
+	w := httptest.NewRecorder()
+	httpReq := withURLParams(
+		newRequest(http.MethodGet, "/api/runtimes/"+otherRuntimeID+"/models/"+req.ID, nil),
+		"runtimeId", otherRuntimeID,
+		"requestId", req.ID,
+	)
+	testHandler.GetModelListRequest(w, httpReq)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("GetModelListRequest runtime mismatch: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestGetModelListRequest_OwnRuntime_Returns200 is the positive control: a
+// member reading their own runtime's request still succeeds. Without this, a
+// regression in the access check could turn every legitimate poll into a 404.
+func TestGetModelListRequest_OwnRuntime_Returns200(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	runtimeID := createModelListTestRuntime(t, testWorkspaceID, "model-own")
+
+	req := testHandler.ModelListStore.Create(runtimeID)
+
+	w := httptest.NewRecorder()
+	httpReq := withURLParams(
+		newRequest(http.MethodGet, "/api/runtimes/"+runtimeID+"/models/"+req.ID, nil),
+		"runtimeId", runtimeID,
+		"requestId", req.ID,
+	)
+	testHandler.GetModelListRequest(w, httpReq)
+	if w.Code != http.StatusOK {
+		t.Fatalf("GetModelListRequest own runtime: expected 200, got %d: %s", w.Code, w.Body.String())
 	}
 }
