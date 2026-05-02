@@ -2,21 +2,12 @@
 
 import React, { useCallback, useEffect, useMemo, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { History, Plus, Bot, ChevronDown, Check } from "lucide-react";
+import { History, Plus, Check } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
-import { Avatar, AvatarFallback, AvatarImage } from "@multica/ui/components/ui/avatar";
 import { Button } from "@multica/ui/components/ui/button";
 import { Tooltip, TooltipTrigger, TooltipContent } from "@multica/ui/components/ui/tooltip";
 import { Popover, PopoverContent, PopoverTrigger } from "@multica/ui/components/ui/popover";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuGroup,
-  DropdownMenuItem,
-  DropdownMenuLabel,
-  DropdownMenuSeparator,
-  DropdownMenuTrigger,
-} from "@multica/ui/components/ui/dropdown-menu";
+import { AgentDropdown, AgentAvatarSmall } from "./agent-dropdown";
 import { useAuthStore } from "@multica/core/auth";
 import { agentListOptions, memberListOptions } from "@multica/core/workspace/queries";
 import { canAssignAgent } from "@multica/views/issues/components";
@@ -483,103 +474,6 @@ function HistoryPopover({
         </div>
       </PopoverContent>
     </Popover>
-  );
-}
-
-function AgentDropdown({
-  agents,
-  activeAgent,
-  userId,
-  onSelect,
-}: {
-  agents: Agent[];
-  activeAgent: Agent | null;
-  userId: string | undefined;
-  onSelect: (agent: Agent) => void;
-}) {
-  const { mine, others } = useMemo(() => {
-    const mine: Agent[] = [];
-    const others: Agent[] = [];
-    for (const a of agents) {
-      if (a.owner_id === userId) mine.push(a);
-      else others.push(a);
-    }
-    return { mine, others };
-  }, [agents, userId]);
-
-  if (!activeAgent) {
-    return <span className="text-xs text-muted-foreground">No agents</span>;
-  }
-
-  return (
-    <DropdownMenu>
-      <DropdownMenuTrigger className="flex items-center gap-1.5 rounded-md px-1.5 py-1 -ml-1 cursor-pointer outline-none transition-colors hover:bg-accent aria-expanded:bg-accent">
-        <AgentAvatarSmall agent={activeAgent} />
-        <span className="text-xs font-medium max-w-28 truncate">{activeAgent.name}</span>
-        <ChevronDown className="size-3 text-muted-foreground shrink-0" />
-      </DropdownMenuTrigger>
-      <DropdownMenuContent align="start" side="top" className="max-h-80 w-auto max-w-64">
-        {mine.length > 0 && (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>My agents</DropdownMenuLabel>
-            {mine.map((agent) => (
-              <AgentMenuItem
-                key={agent.id}
-                agent={agent}
-                isCurrent={agent.id === activeAgent.id}
-                onSelect={onSelect}
-              />
-            ))}
-          </DropdownMenuGroup>
-        )}
-        {mine.length > 0 && others.length > 0 && <DropdownMenuSeparator />}
-        {others.length > 0 && (
-          <DropdownMenuGroup>
-            <DropdownMenuLabel>Others</DropdownMenuLabel>
-            {others.map((agent) => (
-              <AgentMenuItem
-                key={agent.id}
-                agent={agent}
-                isCurrent={agent.id === activeAgent.id}
-                onSelect={onSelect}
-              />
-            ))}
-          </DropdownMenuGroup>
-        )}
-      </DropdownMenuContent>
-    </DropdownMenu>
-  );
-}
-
-function AgentMenuItem({
-  agent,
-  isCurrent,
-  onSelect,
-}: {
-  agent: Agent;
-  isCurrent: boolean;
-  onSelect: (agent: Agent) => void;
-}) {
-  return (
-    <DropdownMenuItem
-      onClick={() => onSelect(agent)}
-      className="flex min-w-0 items-center gap-2"
-    >
-      <AgentAvatarSmall agent={agent} />
-      <span className="truncate flex-1">{agent.name}</span>
-      {isCurrent && <Check className="size-3.5 text-muted-foreground shrink-0" />}
-    </DropdownMenuItem>
-  );
-}
-
-function AgentAvatarSmall({ agent }: { agent: Agent | null }) {
-  return (
-    <Avatar className="size-6 shrink-0">
-      {agent?.avatar_url && <AvatarImage src={agent.avatar_url} />}
-      <AvatarFallback className="bg-purple-100 text-purple-700">
-        <Bot className="size-3.5" />
-      </AvatarFallback>
-    </Avatar>
   );
 }
 

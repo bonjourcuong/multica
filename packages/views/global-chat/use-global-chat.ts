@@ -1,8 +1,13 @@
 "use client";
 
 import { useMutation, useQuery, useQueryClient, queryOptions } from "@tanstack/react-query";
-import { api, type SendGlobalChatMessageResponse } from "@multica/core/api";
+import {
+  api,
+  type SendGlobalChatMessageRequest,
+  type SendGlobalChatMessageResponse,
+} from "@multica/core/api";
 import type {
+  Agent,
   GlobalChatMessage,
   GlobalChatSession,
   GlobalMirrorSummary,
@@ -17,6 +22,7 @@ export const globalChatKeys = {
   session: () => [...globalChatKeys.all, "session", "me"] as const,
   messages: () => [...globalChatKeys.all, "messages", "me"] as const,
   mirrors: () => [...globalChatKeys.all, "mirrors", "me"] as const,
+  agents: () => [...globalChatKeys.all, "agents"] as const,
 };
 
 export function globalChatSessionOptions() {
@@ -49,6 +55,20 @@ export function globalMirrorsOptions() {
   });
 }
 
+/**
+ * Agents eligible to answer on the global lane (V3, MUL-137 backend). The
+ * picker resolves the active agent from this list; author attribution on
+ * agent messages reads from the same cache so archived agents who appear
+ * in history still resolve to a name when present.
+ */
+export function globalChatAgentsOptions() {
+  return queryOptions<Agent[]>({
+    queryKey: globalChatKeys.agents(),
+    queryFn: () => api.listGlobalChatAgents(),
+    staleTime: 60_000,
+  });
+}
+
 export function useGlobalChatSession() {
   return useQuery(globalChatSessionOptions());
 }
@@ -59,6 +79,10 @@ export function useGlobalChatMessages() {
 
 export function useGlobalMirrors() {
   return useQuery(globalMirrorsOptions());
+}
+
+export function useGlobalChatAgents() {
+  return useQuery(globalChatAgentsOptions());
 }
 
 export interface UseSendGlobalChatMessageOptions {
@@ -76,6 +100,10 @@ export interface UseSendGlobalChatMessageOptions {
  * Realtime fan-out lands in MUL-31 — until then this works as a polling
  * surface backed by manual invalidations.
  *
+ * `agent_id` (V3) routes the dispatch to a specific global-eligible agent.
+ * Omitted = server falls back to the user's default agent — kept for V1
+ * call-sites and as a regression guard.
+ *
  * Optional lifecycle callbacks let the caller drive per-target tile state
  * without the hook owning that concern itself.
  */
@@ -83,9 +111,13 @@ export function useSendGlobalChatMessage(
   options?: UseSendGlobalChatMessageOptions,
 ) {
   const qc = useQueryClient();
-  return useMutation<SendGlobalChatMessageResponse, Error, string>({
-    mutationFn: (body) => api.sendGlobalChatMessage(body),
-    onMutate: (body) => {
+  return useMutation<
+    SendGlobalChatMessageResponse,
+    Error,
+    SendGlobalChatMessageRequest
+  >({
+    mutationFn: (payload) => api.sendGlobalChatMessage(payload),
+    onMutate: ({ body }) => {
       options?.onSubmit?.(body);
     },
     onSuccess: (resp) => {
