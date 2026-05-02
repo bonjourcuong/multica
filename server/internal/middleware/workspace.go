@@ -191,6 +191,14 @@ func buildMiddleware(queries *db.Queries, resolve workspaceResolver, roles []str
 				WorkspaceID: util.ParseUUID(workspaceID),
 			})
 			if err != nil {
+				// Existence-hiding 404. INTENTIONAL — do NOT change to 403.
+				// A 403 here would leak the existence of a workspace to a
+				// stranger probing for tenants by slug or UUID. Returning
+				// the same 404 body as the unknown-slug branch above makes
+				// "exists but you're not in it" indistinguishable from
+				// "doesn't exist". Every workspace-scoped endpoint inherits
+				// this contract from this single line; locked down by
+				// TestRequireWorkspaceMember_NonMemberSpoof in workspace_test.go.
 				writeError(w, http.StatusNotFound, "workspace not found")
 				return
 			}
