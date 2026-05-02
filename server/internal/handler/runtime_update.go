@@ -178,10 +178,16 @@ func (h *Handler) InitiateUpdate(w http.ResponseWriter, r *http.Request) {
 
 // GetUpdate returns the status of an update request (protected route, called by frontend).
 func (h *Handler) GetUpdate(w http.ResponseWriter, r *http.Request) {
+	runtimeID := chi.URLParam(r, "runtimeId")
+
+	if _, ok := h.requireDaemonRuntimeAccess(w, r, runtimeID); !ok {
+		return
+	}
+
 	updateID := chi.URLParam(r, "updateId")
 
 	update := h.UpdateStore.Get(updateID)
-	if update == nil {
+	if update == nil || update.RuntimeID != runtimeID {
 		writeError(w, http.StatusNotFound, "update not found")
 		return
 	}
