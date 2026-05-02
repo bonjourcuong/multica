@@ -43,6 +43,23 @@ export interface GlobalChatMessage {
 }
 
 /**
+ * Response from GET /api/global/chat/sessions/me/pending-task. All fields
+ * are absent when the user's global session has no in-flight task — the
+ * server returns an empty object on cold start (no session bootstrapped
+ * yet) so the frontend doesn't have to special-case it.
+ *
+ * `agent_id` lets the FE attribute the "is thinking…" indicator to the
+ * specific agent answering this turn, even if the user switches the
+ * picker mid-flight. Optional because pre-V3 task rows may pre-date the
+ * field; the indicator falls back to the active picker agent when absent.
+ */
+export interface GlobalChatPendingTask {
+  task_id?: string;
+  status?: string;
+  agent_id?: string;
+}
+
+/**
  * Lightweight descriptor returned alongside the workspace list for the global
  * chat tile grid. The mirror session is created lazily on first dispatch, so
  * it can be `null` for workspaces the user has never dispatched to.

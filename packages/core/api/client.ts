@@ -51,6 +51,7 @@ import type {
   SendChatMessageResponse,
   GlobalChatSession,
   GlobalChatMessage,
+  GlobalChatPendingTask,
   GlobalDispatchTarget,
   GlobalMirrorSummary,
   Project,
@@ -136,6 +137,10 @@ export interface SendGlobalChatMessageResponse {
   message: GlobalChatMessage;
   dispatch: GlobalDispatchTarget[];
   mentions: { workspace_slug: string; agent_name?: string }[];
+  /** Present only when an `agent_id` was supplied — the V3 picker path. */
+  task_id?: string;
+  /** Echoes the agent the task was enqueued for; pairs with `task_id`. */
+  agent_id?: string;
 }
 
 /**
@@ -1084,6 +1089,17 @@ export class ApiClient {
       method: "POST",
       body: JSON.stringify(payload),
     });
+  }
+
+  /**
+   * Returns the most recent in-flight task on the user's global chat session.
+   * Mirrors getPendingChatTask but scoped to the global session — the FE
+   * uses it to recover the "agent is thinking" indicator after refresh /
+   * reopen even when the WS event was missed. Empty body when no task is
+   * pending OR when the user has no global session yet.
+   */
+  async getPendingGlobalChatTask(): Promise<GlobalChatPendingTask> {
+    return this.fetch(`/api/global/chat/sessions/me/pending-task`);
   }
 
   /**

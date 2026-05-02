@@ -18,6 +18,13 @@ vi.mock("../use-workspace-mirror", () => ({
   useWorkspaceMirror: () => ({ messages: [] }),
 }));
 
+// Stub useWSEvent for the same reason — the global pending-task indicator
+// listens for global_chat:message but this view-level test doesn't exercise
+// that flow.
+vi.mock("@multica/core/realtime", () => ({
+  useWSEvent: () => undefined,
+}));
+
 vi.mock("@multica/core/auth", () => ({
   useAuthStore: (selector: (s: { user: { id: string } }) => unknown) =>
     selector({ user: { id: "u-1" } }),
@@ -35,6 +42,7 @@ vi.mock("@multica/core/api", () => ({
       sendGlobalChatMessage(payload),
     listGlobalChatMessages: () => listGlobalChatMessages(),
     listGlobalChatAgents: () => listGlobalChatAgents(),
+    getPendingGlobalChatTask: () => Promise.resolve({}),
     getGlobalChatSession: () =>
       Promise.resolve({
         id: "ses-1",

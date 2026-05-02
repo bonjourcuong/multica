@@ -403,6 +403,58 @@ func (h *Handler) PostGlobalAgentReply(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, globalMessageToResponse(msg))
 }
 
+// GlobalPendingChatTaskResponse mirrors PendingChatTaskResponse for the
+// global chat surface — either the in-flight task's id/status/agent, or an
+// empty object when none is active. AgentID lets the FE attribute the
+// "is thinking…" indicator to the actual agent answering this turn,
+// independent of the picker selection.
+type GlobalPendingChatTaskResponse struct {
+	TaskID  string `json:"task_id,omitempty"`
+	Status  string `json:"status,omitempty"`
+	AgentID string `json:"agent_id,omitempty"`
+}
+
+// GetPendingGlobalChatTask is GET /api/global/chat/sessions/me/pending-task.
+// Mirrors GetPendingChatTask for the global session: lets the frontend
+// recover the "agent is thinking" indicator after refresh / reopen even
+// when the WS event was missed.
+//
+// The session is resolved from the caller's user_id (one global session per
+// user, V1 design), so the route shape stays consistent with the rest of
+// /api/global/chat/sessions/me/*. Returns an empty body — not 404 — when
+// the user has no global session yet, so the frontend doesn't need a
+// special-case branch for the cold-start path.
+func (h *Handler) GetPendingGlobalChatTask(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	sess, err := h.GlobalChat.GetSession(r.Context(), parseUUID(userID))
+	if err != nil {
+		if isNotFound(err) {
+			writeJSON(w, http.StatusOK, GlobalPendingChatTaskResponse{})
+			return
+		}
+		slog.Error("get pending global chat task: load session failed",
+			"user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load global chat session")
+		return
+	}
+
+	task, err := h.Queries.GetPendingGlobalChatTask(r.Context(), sess.ID)
+	if err != nil {
+		writeJSON(w, http.StatusOK, GlobalPendingChatTaskResponse{})
+		return
+	}
+
+	writeJSON(w, http.StatusOK, GlobalPendingChatTaskResponse{
+		TaskID:  uuidToString(task.ID),
+		Status:  task.Status,
+		AgentID: uuidToString(task.AgentID),
+	})
+}
+
 // ListGlobalChatAgents is GET /api/global/chat/agents. Returns every
 // non-archived global agent owned by the caller, in the same shape the
 // FE already consumes for `/api/agents`. No workspace middleware: the

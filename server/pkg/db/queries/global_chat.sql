@@ -32,6 +32,17 @@ INSERT INTO global_chat_message
 VALUES ($1, $2, $3, $4, $5)
 RETURNING *;
 
+-- name: GetPendingGlobalChatTask :one
+-- Returns the most recent in-flight task for a global chat session, if any.
+-- Mirrors GetPendingChatTask but binds the lookup to global_session_id so the
+-- frontend can recover the "agent is thinking" indicator after refresh /
+-- reopen even when the WS event was missed. Returns agent_id so the FE can
+-- attribute the indicator to the specific agent answering this turn.
+SELECT id, status, agent_id FROM agent_task_queue
+WHERE global_session_id = $1 AND status IN ('queued', 'dispatched', 'running')
+ORDER BY created_at DESC
+LIMIT 1;
+
 -- name: AppendGlobalChatDispatchedTo :exec
 -- Appends a dispatch record (a JSON object {workspace_id, mirror_session_id,
 -- mirror_message_id}) onto the originating global_chat_message.dispatched_to

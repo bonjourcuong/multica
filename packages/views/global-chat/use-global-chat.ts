@@ -9,6 +9,7 @@ import {
 import type {
   Agent,
   GlobalChatMessage,
+  GlobalChatPendingTask,
   GlobalChatSession,
   GlobalMirrorSummary,
 } from "@multica/core/types";
@@ -23,6 +24,7 @@ export const globalChatKeys = {
   messages: () => [...globalChatKeys.all, "messages", "me"] as const,
   mirrors: () => [...globalChatKeys.all, "mirrors", "me"] as const,
   agents: () => [...globalChatKeys.all, "agents"] as const,
+  pendingTask: () => [...globalChatKeys.all, "pending-task", "me"] as const,
 };
 
 export function globalChatSessionOptions() {
@@ -85,6 +87,27 @@ export function useGlobalChatAgents() {
   return useQuery(globalChatAgentsOptions());
 }
 
+/**
+ * Pending task on the user's global chat session — drives the
+ * "<agent> is thinking…" indicator. Mirrors the workspace chat surface
+ * (see `pendingChatTaskOptions`) but keyed off the user's single global
+ * session instead of a workspace-scoped chat session id.
+ *
+ * Refetched via WS `global_chat:message` invalidation in the pane and via
+ * the optimistic seed the send mutation writes into the cache on success.
+ */
+export function pendingGlobalChatTaskOptions() {
+  return queryOptions<GlobalChatPendingTask>({
+    queryKey: globalChatKeys.pendingTask(),
+    queryFn: () => api.getPendingGlobalChatTask(),
+    staleTime: Infinity,
+  });
+}
+
+export function usePendingGlobalChatTask() {
+  return useQuery(pendingGlobalChatTaskOptions());
+}
+
 export interface UseSendGlobalChatMessageOptions {
   /** Fires before the network request — used to flip tiles to `sending`. */
   onSubmit?: (body: string) => void;
@@ -125,6 +148,19 @@ export function useSendGlobalChatMessage(
         globalChatKeys.messages(),
         (prev) => (prev ? [...prev, resp.message] : [resp.message]),
       );
+      // Seed the pending-task cache so the "is thinking…" indicator shows
+      // up immediately, before the next refetch round-trips. Empty payloads
+      // (no agent picked → no task enqueued) clear it instead, which is
+      // also the correct steady state.
+      if (resp.task_id) {
+        qc.setQueryData<GlobalChatPendingTask>(globalChatKeys.pendingTask(), {
+          task_id: resp.task_id,
+          status: "queued",
+          ...(resp.agent_id ? { agent_id: resp.agent_id } : {}),
+        });
+      } else {
+        qc.setQueryData<GlobalChatPendingTask>(globalChatKeys.pendingTask(), {});
+      }
       options?.onResolved?.(resp);
     },
     onError: (err) => {
