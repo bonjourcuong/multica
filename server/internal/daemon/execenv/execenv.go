@@ -39,6 +39,7 @@ type TaskContextForEnv struct {
 	AgentSkills             []SkillContextForEnv
 	Repos                   []RepoContextForEnv // workspace repos available for checkout
 	ChatSessionID           string              // non-empty for chat tasks
+	GlobalSessionID         string              // non-empty for global-chat tasks (no workspace, no issue)
 	AutopilotRunID          string              // non-empty for autopilot run_only tasks
 	AutopilotID             string
 	AutopilotTitle          string
