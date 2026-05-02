@@ -35,12 +35,24 @@ func TestFromDirOrEnv(t *testing.T) {
 		}
 	})
 
-	t.Run("trims trailing newline from file", func(t *testing.T) {
+	t.Run("trims exactly one trailing newline from file", func(t *testing.T) {
 		dir := t.TempDir()
 		writeSecret(t, dir, "jwt_secret", "from-file\n")
 
 		if got := fromDirOrEnv(dir, "JWT_SECRET"); got != "from-file" {
 			t.Errorf("got %q, want %q", got, "from-file")
+		}
+	})
+
+	t.Run("preserves additional trailing newlines (only one is stripped)", func(t *testing.T) {
+		// Regression: an earlier draft used strings.TrimRight(s, "\n") which
+		// stripped every trailing newline and would silently mangle a secret
+		// whose intended value ended with a newline.
+		dir := t.TempDir()
+		writeSecret(t, dir, "jwt_secret", "from-file\n\n")
+
+		if got := fromDirOrEnv(dir, "JWT_SECRET"); got != "from-file\n" {
+			t.Errorf("got %q, want %q", got, "from-file\n")
 		}
 	})
 
