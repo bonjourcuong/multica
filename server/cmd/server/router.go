@@ -275,6 +275,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 			r.Route("/sessions/me/messages", func(r chi.Router) {
 				r.Get("/", h.ListGlobalMessages)
 				r.Post("/", h.PostGlobalMessage)
+				r.Post("/agent-reply", h.PostGlobalAgentReply)
 			})
 			r.Get("/agents", h.ListGlobalChatAgents)
 			r.Get("/mirrors", h.ListGlobalMirrors)

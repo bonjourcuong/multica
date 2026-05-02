@@ -308,6 +308,80 @@ func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, resp)
 }
 
+// PostGlobalAgentReply is POST /api/global/chat/sessions/me/messages/agent-reply.
+// Backs the CLI `multica global-chat reply` command (MUL-158): an
+// orchestrator agent running inside a daemon-managed global chat task
+// calls this to stream interim replies into the user's chat pane while
+// the task is still running. The CLI authenticates with the daemon's PAT
+// (so requireUserID resolves to the agent's owner) and passes the agent
+// id either in the request body or via the X-Agent-ID header that the
+// CLI sets automatically from MULTICA_AGENT_ID.
+//
+// This is intentionally separate from the workspace-chat completion
+// writeback (TaskService.CompleteTask → writeGlobalChatAgentReply) which
+// posts the agent's final terminal output exactly once when the task
+// completes. PostGlobalAgentReply is for *interactive* replies during
+// the task — the CompleteTask writeback still fires at the end with the
+// agent's final output.
+func (h *Handler) PostGlobalAgentReply(w http.ResponseWriter, r *http.Request) {
+	userID, ok := requireUserID(w, r)
+	if !ok {
+		return
+	}
+
+	var req struct {
+		Content  string          `json:"content"`
+		AgentID  string          `json:"agent_id"`
+		Metadata json.RawMessage `json:"metadata,omitempty"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if req.Content == "" {
+		writeError(w, http.StatusBadRequest, "content is required")
+		return
+	}
+
+	// Allow X-Agent-ID header as a fallback so the CLI doesn't have to
+	// repeat MULTICA_AGENT_ID in every body. Body field wins when both
+	// are set so an explicit caller can override the env-derived default.
+	if req.AgentID == "" {
+		req.AgentID = r.Header.Get("X-Agent-ID")
+	}
+	if req.AgentID == "" {
+		writeError(w, http.StatusBadRequest, "agent_id is required (set in body or X-Agent-ID header)")
+		return
+	}
+	agentUUID := parseUUID(req.AgentID)
+	if !agentUUID.Valid {
+		writeError(w, http.StatusBadRequest, "invalid agent_id")
+		return
+	}
+
+	var metadata []byte
+	if len(req.Metadata) > 0 {
+		metadata = []byte(req.Metadata)
+	}
+
+	msg, err := h.GlobalChat.PostAgentReply(r.Context(), parseUUID(userID), agentUUID, req.Content, metadata)
+	if err != nil {
+		if isNotFound(err) {
+			// Collapse "agent doesn't exist" + "not your global agent"
+			// into 404 so a probing caller can't enumerate cross-user
+			// agent IDs.
+			writeError(w, http.StatusNotFound, "agent not found")
+			return
+		}
+		slog.Error("post global agent reply failed",
+			"user_id", userID, "agent_id", req.AgentID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to post agent reply")
+		return
+	}
+
+	writeJSON(w, http.StatusCreated, globalMessageToResponse(msg))
+}
+
 // ListGlobalChatAgents is GET /api/global/chat/agents. Returns every
 // non-archived global agent owned by the caller, in the same shape the
 // FE already consumes for `/api/agents`. No workspace middleware: the
