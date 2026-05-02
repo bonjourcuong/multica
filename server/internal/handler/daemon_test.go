@@ -1752,3 +1752,238 @@ func TestRequireDaemonTaskAccess_GlobalChatTask_ForeignDaemonRejected(t *testing
 		t.Fatalf("foreign daemon must not start the task; expected status 'dispatched', got %q", status)
 	}
 }
+
+// TestRequireDaemonTaskAccess_UnknownKindRejected covers MUL-193's
+// TaskKindUnknown branch: a task row with no recognized entity-type FK
+// (orphaned, or a future pathway not yet wired through the resolver)
+// must 404 every daemon lifecycle endpoint rather than fall through
+// silently. Before the typed refactor, the resolver returned "" and
+// every caller had to remember to reject — exactly the bug shape that
+// produced MUL-182.
+func TestRequireDaemonTaskAccess_UnknownKindRejected(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("setup: get agent: %v", err)
+	}
+
+	// All four entity-type FKs deliberately NULL: this is the row shape
+	// the next entity-type addition would temporarily produce if the
+	// resolver wasn't taught about it. The handler must reject loudly.
+	var taskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (
+			agent_id, runtime_id, status, priority
+		)
+		VALUES ($1, $2, 'dispatched', 0)
+		RETURNING id
+	`, agentID, runtimeID).Scan(&taskID); err != nil {
+		t.Fatalf("setup: create orphan task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, taskID) })
+
+	w := httptest.NewRecorder()
+	req := newDaemonTokenRequest("POST", "/api/daemon/tasks/"+taskID+"/start", nil,
+		testWorkspaceID, "legit-daemon")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("taskId", taskID)
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+
+	testHandler.StartTask(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("StartTask on unknown-kind task: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// TestListTaskMessagesByUser_AllowlistByKind locks down the explicit
+// allowlist behavior of MUL-193 Finding #4. The route is workspace-
+// scoped (under regular user auth, not daemon auth) and must surface
+// only Issue and Chat tasks. Autopilot, Global, and Unknown kinds 404
+// — disambiguating "task by design has no workspace" from "workspace
+// mismatch" and forcing every future entity-type to opt in explicitly.
+func TestListTaskMessagesByUser_AllowlistByKind(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("database not available")
+	}
+
+	ctx := context.Background()
+
+	var agentID, runtimeID string
+	if err := testPool.QueryRow(ctx, `
+		SELECT a.id, a.runtime_id FROM agent a WHERE a.workspace_id = $1 LIMIT 1
+	`, testWorkspaceID).Scan(&agentID, &runtimeID); err != nil {
+		t.Fatalf("setup: get agent: %v", err)
+	}
+
+	// Issue task — must be visible (200).
+	var issueID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO issue (workspace_id, title, status, priority, creator_type, creator_id)
+		VALUES ($1, 'allowlist test', 'todo', 'low', 'member', $2)
+		RETURNING id
+	`, testWorkspaceID, testUserID).Scan(&issueID); err != nil {
+		t.Fatalf("setup: create issue: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM issue WHERE id = $1`, issueID) })
+
+	var issueTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, issue_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, agentID, runtimeID, issueID).Scan(&issueTaskID); err != nil {
+		t.Fatalf("setup: create issue task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, issueTaskID) })
+
+	// Chat task — must be visible (200).
+	var chatSessionID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, scope)
+		VALUES ($1, $2, $3, 'allowlist chat', 'workspace')
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&chatSessionID); err != nil {
+		t.Fatalf("setup: create chat session: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM chat_session WHERE id = $1`, chatSessionID) })
+
+	var chatTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, chat_session_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, agentID, runtimeID, chatSessionID).Scan(&chatTaskID); err != nil {
+		t.Fatalf("setup: create chat task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, chatTaskID) })
+
+	// Autopilot task — must NOT be visible (404).
+	var autopilotID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO autopilot (workspace_id, title, assignee_id, execution_mode, created_by_type, created_by_id)
+		VALUES ($1, 'allowlist autopilot', $2, 'run_only', 'member', $3)
+		RETURNING id
+	`, testWorkspaceID, agentID, testUserID).Scan(&autopilotID); err != nil {
+		t.Fatalf("setup: create autopilot: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM autopilot WHERE id = $1`, autopilotID) })
+
+	var autopilotRunID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO autopilot_run (autopilot_id, source, status)
+		VALUES ($1, 'manual', 'running')
+		RETURNING id
+	`, autopilotID).Scan(&autopilotRunID); err != nil {
+		t.Fatalf("setup: create autopilot run: %v", err)
+	}
+
+	var autopilotTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, autopilot_run_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, agentID, runtimeID, autopilotRunID).Scan(&autopilotTaskID); err != nil {
+		t.Fatalf("setup: create autopilot task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, autopilotTaskID) })
+
+	// Global chat task — must NOT be visible (404).
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+	var globalTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, global_session_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, f.ClaudeCodeAgentID, runtimeID, f.GlobalSessionID).Scan(&globalTaskID); err != nil {
+		t.Fatalf("setup: create global chat task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, globalTaskID) })
+
+	// Unknown-kind task — must NOT be visible (404).
+	var unknownTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, status, priority)
+		VALUES ($1, $2, 'queued', 0)
+		RETURNING id
+	`, agentID, runtimeID).Scan(&unknownTaskID); err != nil {
+		t.Fatalf("setup: create orphan task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, unknownTaskID) })
+
+	cases := []struct {
+		name   string
+		taskID string
+		want   int
+	}{
+		{"issue task is visible", issueTaskID, http.StatusOK},
+		{"chat task is visible", chatTaskID, http.StatusOK},
+		{"autopilot task is hidden", autopilotTaskID, http.StatusNotFound},
+		{"global task is hidden", globalTaskID, http.StatusNotFound},
+		{"unknown-kind task is hidden", unknownTaskID, http.StatusNotFound},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			req := withWorkspaceContext(
+				newRequest("GET", "/api/tasks/"+tc.taskID+"/messages", nil),
+				testWorkspaceID, testUserID,
+			)
+			req = withURLParam(req, "taskId", tc.taskID)
+			w := httptest.NewRecorder()
+			testHandler.ListTaskMessagesByUser(w, req)
+			if w.Code != tc.want {
+				t.Fatalf("expected %d, got %d: %s", tc.want, w.Code, w.Body.String())
+			}
+		})
+	}
+
+	// Cross-workspace probe: a chat task whose session lives in another
+	// workspace must 404 too. Locks the workspace-mismatch branch
+	// untouched by the kind allowlist.
+	var foreignWorkspaceID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO workspace (name, slug, issue_prefix)
+		VALUES ('foreign ws', 'foreign-ws-' || gen_random_uuid()::text, 'FW')
+		RETURNING id::text
+	`).Scan(&foreignWorkspaceID); err != nil {
+		t.Fatalf("setup: create foreign workspace: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM workspace WHERE id = $1`, foreignWorkspaceID) })
+
+	var foreignChatSessionID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO chat_session (workspace_id, agent_id, creator_id, title, scope)
+		VALUES ($1, $2, $3, 'foreign chat', 'workspace')
+		RETURNING id
+	`, foreignWorkspaceID, agentID, testUserID).Scan(&foreignChatSessionID); err != nil {
+		t.Fatalf("setup: create foreign chat session: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM chat_session WHERE id = $1`, foreignChatSessionID) })
+
+	var foreignChatTaskID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO agent_task_queue (agent_id, runtime_id, chat_session_id, status, priority)
+		VALUES ($1, $2, $3, 'queued', 0)
+		RETURNING id
+	`, agentID, runtimeID, foreignChatSessionID).Scan(&foreignChatTaskID); err != nil {
+		t.Fatalf("setup: create foreign chat task: %v", err)
+	}
+	t.Cleanup(func() { testPool.Exec(context.Background(), `DELETE FROM agent_task_queue WHERE id = $1`, foreignChatTaskID) })
+
+	req := withWorkspaceContext(
+		newRequest("GET", "/api/tasks/"+foreignChatTaskID+"/messages", nil),
+		testWorkspaceID, testUserID,
+	)
+	req = withURLParam(req, "taskId", foreignChatTaskID)
+	w := httptest.NewRecorder()
+	testHandler.ListTaskMessagesByUser(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("cross-workspace chat task: expected 404, got %d: %s", w.Code, w.Body.String())
+	}
+}

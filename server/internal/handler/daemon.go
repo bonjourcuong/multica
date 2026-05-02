@@ -18,6 +18,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/middleware"
+	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/multica-ai/multica/server/pkg/protocol"
 	"github.com/multica-ai/multica/server/pkg/redact"
@@ -63,18 +64,20 @@ func (h *Handler) requireDaemonRuntimeAccess(w http.ResponseWriter, r *http.Requ
 	return rt, true
 }
 
-// requireDaemonTaskAccess looks up a task and verifies the caller owns its workspace.
+// requireDaemonTaskAccess looks up a task and verifies the caller is
+// allowed to drive it. Isolation rule depends on the task kind:
 //
-// Global chat tasks (V3, MUL-137) have no workspace by design — every
-// workspace-side FK on agent_task_queue (issue_id, chat_session_id,
-// autopilot_run_id) is NULL — so ResolveTaskWorkspaceID returns "" for
-// them. Falling through the workspace check would 404 every lifecycle
-// call (start, complete, fail, progress, heartbeat, …) and the chat
-// would silently time out at the 5-minute sweeper. Bypass the workspace
-// check in that case and gate on runtime ownership instead: the daemon
-// must own the runtime the task's agent is bound to. This is the same
-// isolation guarantee ClaimTaskByRuntime already enforces for the
-// claim endpoint (MUL-165, commit b20a9aff).
+//   - Issue / Chat / Autopilot: workspace-scoped. Caller must own the
+//     resolved workspace (daemon token workspace match, or workspace
+//     membership on PAT/JWT fallback).
+//   - Global (V3 global chat, MUL-137): tenantless by design — every
+//     workspace-side FK is NULL, so workspace match is meaningless.
+//     Gate on runtime ownership instead: the daemon must own the
+//     runtime the task's agent is bound to. Same isolation guarantee
+//     as ClaimTaskByRuntime (MUL-165, commit b20a9aff).
+//   - Unknown: orphaned row or future entity-type pathway not yet
+//     wired into the resolver — reject with 404 and an explicit log
+//     so the next entity-type addition fails loud rather than silent.
 func (h *Handler) requireDaemonTaskAccess(w http.ResponseWriter, r *http.Request, taskID string) (db.AgentTaskQueue, bool) {
 	task, err := h.Queries.GetAgentTask(r.Context(), parseUUID(taskID))
 	if err != nil {
@@ -82,7 +85,23 @@ func (h *Handler) requireDaemonTaskAccess(w http.ResponseWriter, r *http.Request
 		return db.AgentTaskQueue{}, false
 	}
 
-	if task.GlobalSessionID.Valid {
+	wsID, kind, resolveErr := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
+	if resolveErr != nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return db.AgentTaskQueue{}, false
+	}
+
+	switch kind {
+	case service.TaskKindIssue, service.TaskKindChat, service.TaskKindAutopilot:
+		if wsID == "" {
+			writeError(w, http.StatusNotFound, "task not found")
+			return db.AgentTaskQueue{}, false
+		}
+		if !h.requireDaemonWorkspaceAccess(w, r, wsID) {
+			return db.AgentTaskQueue{}, false
+		}
+		return task, true
+	case service.TaskKindGlobal:
 		agent, err := h.Queries.GetAgent(r.Context(), task.AgentID)
 		if err != nil || !agent.RuntimeID.Valid {
 			writeError(w, http.StatusNotFound, "task not found")
@@ -92,18 +111,17 @@ func (h *Handler) requireDaemonTaskAccess(w http.ResponseWriter, r *http.Request
 			return db.AgentTaskQueue{}, false
 		}
 		return task, true
-	}
-
-	wsID := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
-	if wsID == "" {
+	default:
+		// TaskKindUnknown — orphaned row or future entity-type
+		// pathway not yet wired through the resolver. Logging here
+		// turns the silent fallthrough into a loud signal so the
+		// next pathway addition surfaces immediately.
+		slog.Warn("daemon task access: task has no recognized entity-type FK",
+			"task_id", taskID,
+		)
 		writeError(w, http.StatusNotFound, "task not found")
 		return db.AgentTaskQueue{}, false
 	}
-
-	if !h.requireDaemonWorkspaceAccess(w, r, wsID) {
-		return db.AgentTaskQueue{}, false
-	}
-	return task, true
 }
 
 // verifyDaemonWorkspaceAccess checks workspace access without writing an HTTP error.
@@ -1440,7 +1458,13 @@ func (h *Handler) ListTasksByIssue(w http.ResponseWriter, r *http.Request) {
 
 // ListTaskMessagesByUser returns task messages for a task.
 // Used by the frontend under regular user auth (not daemon auth).
-// Verifies the task belongs to the caller's workspace.
+//
+// Visibility is an explicit allowlist of task kinds: only Issue and
+// Chat tasks are surfaced on the workspace-scoped route. Autopilot and
+// Global tasks 404 here — global chat is per-user and uses a separate
+// channel, autopilot-task messages are not yet exposed on this route.
+// Unknown kinds also 404 so the next entity-type pathway has to opt in
+// rather than fall through silently.
 func (h *Handler) ListTaskMessagesByUser(w http.ResponseWriter, r *http.Request) {
 	taskID := chi.URLParam(r, "taskId")
 
@@ -1450,9 +1474,16 @@ func (h *Handler) ListTaskMessagesByUser(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	// Verify the task belongs to the caller's workspace.
-	wsID := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
-	if wsID == "" || wsID != middleware.WorkspaceIDFromContext(r.Context()) {
+	wsID, kind, resolveErr := h.TaskService.ResolveTaskWorkspaceID(r.Context(), task)
+	if resolveErr != nil {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if kind != service.TaskKindIssue && kind != service.TaskKindChat {
+		writeError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if wsID != middleware.WorkspaceIDFromContext(r.Context()) {
 		writeError(w, http.StatusNotFound, "task not found")
 		return
 	}

@@ -865,7 +865,25 @@ func (s *TaskService) HandleFailedTasks(ctx context.Context, tasks []db.AgentTas
 			}
 		}
 		if workspaceID == "" {
-			workspaceID = s.ResolveTaskWorkspaceID(ctx, t)
+			// Workspace lookup failed inline (non-issue task or missing
+			// issue row). Fall back to the resolver for chat/autopilot.
+			// Global tasks return ("", TaskKindGlobal, nil) — they have
+			// no workspace channel by design and are handled by MUL-192's
+			// per-user broadcast helper. Unknown is logged and skipped
+			// (orphaned row or future entity-type pathway not yet wired).
+			ws, kind, err := s.ResolveTaskWorkspaceID(ctx, t)
+			if err != nil {
+				slog.Warn("handle failed tasks: resolve workspace failed",
+					"task_id", util.UUIDToString(t.ID),
+					"kind", string(kind),
+					"error", err,
+				)
+			} else if kind == TaskKindUnknown {
+				slog.Warn("handle failed tasks: task has no recognized entity-type FK",
+					"task_id", util.UUIDToString(t.ID),
+				)
+			}
+			workspaceID = ws
 		}
 
 		if workspaceID != "" {
@@ -1018,83 +1036,200 @@ func (s *TaskService) broadcastTaskDispatch(ctx context.Context, task db.AgentTa
 	payload["issue_id"] = util.UUIDToString(task.IssueID)
 	payload["agent_id"] = util.UUIDToString(task.AgentID)
 
-	workspaceID := s.ResolveTaskWorkspaceID(ctx, task)
-	if workspaceID == "" {
+	workspaceID, kind, err := s.ResolveTaskWorkspaceID(ctx, task)
+	if err != nil {
+		slog.Warn("broadcast task dispatch: resolve workspace failed",
+			"task_id", util.UUIDToString(task.ID),
+			"kind", string(kind),
+			"error", err,
+		)
 		return
 	}
-	s.Bus.Publish(events.Event{
-		Type:        protocol.EventTaskDispatch,
-		WorkspaceID: workspaceID,
-		ActorType:   "system",
-		ActorID:     "",
-		Payload:     payload,
-	})
+	switch kind {
+	case TaskKindIssue, TaskKindChat, TaskKindAutopilot:
+		s.Bus.Publish(events.Event{
+			Type:        protocol.EventTaskDispatch,
+			WorkspaceID: workspaceID,
+			ActorType:   "system",
+			ActorID:     "",
+			Payload:     payload,
+		})
+	case TaskKindGlobal:
+		// Global tasks broadcast on the per-user channel, not the
+		// workspace channel. Implementation lives in MUL-192's
+		// broadcastGlobalTaskEvent helper.
+	case TaskKindUnknown:
+		slog.Warn("broadcast task dispatch: task has no recognized entity-type FK",
+			"task_id", util.UUIDToString(task.ID),
+		)
+	}
 }
 
 func (s *TaskService) broadcastTaskEvent(ctx context.Context, eventType string, task db.AgentTaskQueue) {
-	workspaceID := s.ResolveTaskWorkspaceID(ctx, task)
-	if workspaceID == "" {
+	workspaceID, kind, err := s.ResolveTaskWorkspaceID(ctx, task)
+	if err != nil {
+		slog.Warn("broadcast task event: resolve workspace failed",
+			"task_id", util.UUIDToString(task.ID),
+			"event", eventType,
+			"kind", string(kind),
+			"error", err,
+		)
 		return
 	}
-	payload := map[string]any{
-		"task_id":  util.UUIDToString(task.ID),
-		"agent_id": util.UUIDToString(task.AgentID),
-		"issue_id": util.UUIDToString(task.IssueID),
-		"status":   task.Status,
+	switch kind {
+	case TaskKindIssue, TaskKindChat, TaskKindAutopilot:
+		payload := map[string]any{
+			"task_id":  util.UUIDToString(task.ID),
+			"agent_id": util.UUIDToString(task.AgentID),
+			"issue_id": util.UUIDToString(task.IssueID),
+			"status":   task.Status,
+		}
+		if task.ChatSessionID.Valid {
+			payload["chat_session_id"] = util.UUIDToString(task.ChatSessionID)
+		}
+		s.Bus.Publish(events.Event{
+			Type:        eventType,
+			WorkspaceID: workspaceID,
+			ActorType:   "system",
+			ActorID:     "",
+			Payload:     payload,
+		})
+	case TaskKindGlobal:
+		// MUL-192: per-user global-chat broadcast lands in a separate
+		// helper. Workspace-channel publish is intentionally skipped.
+	case TaskKindUnknown:
+		slog.Warn("broadcast task event: task has no recognized entity-type FK",
+			"task_id", util.UUIDToString(task.ID),
+			"event", eventType,
+		)
 	}
-	if task.ChatSessionID.Valid {
-		payload["chat_session_id"] = util.UUIDToString(task.ChatSessionID)
-	}
-	s.Bus.Publish(events.Event{
-		Type:        eventType,
-		WorkspaceID: workspaceID,
-		ActorType:   "system",
-		ActorID:     "",
-		Payload:     payload,
-	})
 }
 
-// ResolveTaskWorkspaceID determines the workspace ID for a task.
-// For issue tasks, it comes from the issue. For chat tasks, from the chat session.
-// For autopilot tasks, from the autopilot via its run.
-// Returns "" when none of the links resolve — callers treat that as "not found".
-func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentTaskQueue) string {
-	if task.IssueID.Valid {
-		if issue, err := s.Queries.GetIssue(ctx, task.IssueID); err == nil {
-			return util.UUIDToString(issue.WorkspaceID)
-		}
+// TaskKind classifies an agent_task_queue row by which entity-type FK
+// pins it to a scope. Adding a new entity-type column on agent_task_queue
+// MUST add a new TaskKind value and a branch in TaskKindOf and
+// ResolveTaskWorkspaceID — otherwise every consumer silently drops to
+// the Unknown branch (the bug class behind MUL-182 and MUL-192).
+type TaskKind string
+
+const (
+	// TaskKindUnknown is returned when none of the recognized entity-type
+	// FKs is set on the task row. Either the row is genuinely orphaned
+	// or a new entity-type pathway has been added without updating the
+	// resolver. Callers must treat this as an error / 404.
+	TaskKindUnknown TaskKind = "unknown"
+	// TaskKindIssue: task is pinned to an issue, scoped to issue.workspace_id.
+	TaskKindIssue TaskKind = "issue"
+	// TaskKindChat: task is pinned to a workspace-scoped chat session,
+	// scoped to chat_session.workspace_id.
+	TaskKindChat TaskKind = "chat"
+	// TaskKindAutopilot: task was enqueued by an autopilot run, scoped
+	// to autopilot.workspace_id.
+	TaskKindAutopilot TaskKind = "autopilot"
+	// TaskKindGlobal: V3 global chat task (MUL-137). Tenantless by
+	// design — no workspace_id. Isolation must be enforced via runtime
+	// ownership, not workspace match.
+	TaskKindGlobal TaskKind = "global"
+)
+
+// TaskKindOf classifies a task by which entity-type FK is set on its row.
+// Returns TaskKindUnknown when none of the recognized FKs is set. The
+// order matches the historical resolver: Issue > Chat > Autopilot >
+// Global, so a row that defensively carries multiple FKs (none should
+// today) reports the most workspace-scoped kind first.
+func TaskKindOf(task db.AgentTaskQueue) TaskKind {
+	switch {
+	case task.IssueID.Valid:
+		return TaskKindIssue
+	case task.ChatSessionID.Valid:
+		return TaskKindChat
+	case task.AutopilotRunID.Valid:
+		return TaskKindAutopilot
+	case task.GlobalSessionID.Valid:
+		return TaskKindGlobal
+	default:
+		return TaskKindUnknown
 	}
-	if task.ChatSessionID.Valid {
-		if cs, err := s.Queries.GetChatSession(ctx, task.ChatSessionID); err == nil {
-			return util.UUIDToString(cs.WorkspaceID)
+}
+
+// ResolveTaskWorkspaceID returns the workspace_id the task is scoped to,
+// the entity-type kind that pins it to that scope, and an error if the
+// underlying entity row could not be loaded.
+//
+// Returned (workspaceID, kind, err) values per kind:
+//   - Issue / Chat / Autopilot: workspaceID is the resolved workspace
+//     UUID; err is non-nil iff the linked entity row is missing.
+//   - Global: workspaceID is "" by design — global chat is tenantless;
+//     callers must gate on runtime ownership, not workspace match.
+//   - Unknown: workspaceID is "" and err is nil; callers must treat
+//     this as 404.
+//
+// Adding a new entity-type FK on agent_task_queue requires extending
+// TaskKind, TaskKindOf, and the switch below. The typed return forces
+// every consumer to update its branching, which closes the silent-drop
+// class of bug seen in MUL-182.
+func (s *TaskService) ResolveTaskWorkspaceID(ctx context.Context, task db.AgentTaskQueue) (string, TaskKind, error) {
+	kind := TaskKindOf(task)
+	switch kind {
+	case TaskKindIssue:
+		issue, err := s.Queries.GetIssue(ctx, task.IssueID)
+		if err != nil {
+			return "", kind, fmt.Errorf("get issue: %w", err)
 		}
-	}
-	if task.AutopilotRunID.Valid {
-		if run, err := s.Queries.GetAutopilotRun(ctx, task.AutopilotRunID); err == nil {
-			if ap, err := s.Queries.GetAutopilot(ctx, run.AutopilotID); err == nil {
-				return util.UUIDToString(ap.WorkspaceID)
-			}
+		return util.UUIDToString(issue.WorkspaceID), kind, nil
+	case TaskKindChat:
+		cs, err := s.Queries.GetChatSession(ctx, task.ChatSessionID)
+		if err != nil {
+			return "", kind, fmt.Errorf("get chat session: %w", err)
 		}
+		return util.UUIDToString(cs.WorkspaceID), kind, nil
+	case TaskKindAutopilot:
+		run, err := s.Queries.GetAutopilotRun(ctx, task.AutopilotRunID)
+		if err != nil {
+			return "", kind, fmt.Errorf("get autopilot run: %w", err)
+		}
+		ap, err := s.Queries.GetAutopilot(ctx, run.AutopilotID)
+		if err != nil {
+			return "", kind, fmt.Errorf("get autopilot: %w", err)
+		}
+		return util.UUIDToString(ap.WorkspaceID), kind, nil
+	case TaskKindGlobal:
+		return "", kind, nil
+	default:
+		return "", TaskKindUnknown, nil
 	}
-	return ""
 }
 
 func (s *TaskService) broadcastChatDone(ctx context.Context, task db.AgentTaskQueue) {
-	workspaceID := s.ResolveTaskWorkspaceID(ctx, task)
-	if workspaceID == "" {
+	workspaceID, kind, err := s.ResolveTaskWorkspaceID(ctx, task)
+	if err != nil {
+		slog.Warn("broadcast chat done: resolve workspace failed",
+			"task_id", util.UUIDToString(task.ID),
+			"kind", string(kind),
+			"error", err,
+		)
 		return
 	}
-	s.Bus.Publish(events.Event{
-		Type:          protocol.EventChatDone,
-		WorkspaceID:   workspaceID,
-		ActorType:     "system",
-		ActorID:       "",
-		ChatSessionID: util.UUIDToString(task.ChatSessionID),
-		Payload: protocol.ChatDonePayload{
+	switch kind {
+	case TaskKindChat, TaskKindIssue, TaskKindAutopilot:
+		s.Bus.Publish(events.Event{
+			Type:          protocol.EventChatDone,
+			WorkspaceID:   workspaceID,
+			ActorType:     "system",
+			ActorID:       "",
 			ChatSessionID: util.UUIDToString(task.ChatSessionID),
-			TaskID:        util.UUIDToString(task.ID),
-		},
-	})
+			Payload: protocol.ChatDonePayload{
+				ChatSessionID: util.UUIDToString(task.ChatSessionID),
+				TaskID:        util.UUIDToString(task.ID),
+			},
+		})
+	case TaskKindGlobal:
+		// MUL-192: handled by per-user global-chat broadcast helper.
+	case TaskKindUnknown:
+		slog.Warn("broadcast chat done: task has no recognized entity-type FK",
+			"task_id", util.UUIDToString(task.ID),
+		)
+	}
 }
 
 func (s *TaskService) broadcastIssueUpdated(issue db.Issue) {
