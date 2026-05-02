@@ -4,12 +4,49 @@ import (
 	"context"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/multica-ai/multica/server/internal/auth"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
+
+// daemonAuthStrict reports whether the DAEMON_AUTH_STRICT env var is set to
+// a truthy value. Default is false to preserve the legacy PAT/JWT-as-daemon
+// fallback for installs that have not yet migrated to mdt_ tokens (MUL-195).
+func daemonAuthStrict() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("DAEMON_AUTH_STRICT"))) {
+	case "true", "1", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// daemonAuthFallbackAllowed reports whether a user-credential (mul_ PAT or
+// JWT) may authenticate the given daemon route. Outside strict mode the
+// fallback is permitted on every route. In strict mode only the
+// daemon-bootstrap routes — /register, /heartbeat, and /workspaces/{id}/repos
+// — accept a user credential; every other daemon route requires an mdt_
+// token (MUL-195).
+func daemonAuthFallbackAllowed(path string, strict bool) bool {
+	if !strict {
+		return true
+	}
+	switch path {
+	case "/api/daemon/register", "/api/daemon/heartbeat":
+		return true
+	}
+	const wsPrefix = "/api/daemon/workspaces/"
+	const reposSuffix = "/repos"
+	if strings.HasPrefix(path, wsPrefix) && strings.HasSuffix(path, reposSuffix) {
+		mid := strings.TrimSuffix(strings.TrimPrefix(path, wsPrefix), reposSuffix)
+		if mid != "" && !strings.Contains(mid, "/") {
+			return true
+		}
+	}
+	return false
+}
 
 // Daemon context keys.
 type daemonContextKey int
@@ -84,6 +121,17 @@ func DaemonAuth(queries *db.Queries) func(http.Handler) http.Handler {
 				ctx = context.WithValue(ctx, ctxKeyDaemonID, dt.DaemonID)
 				ctx = context.WithValue(ctx, ctxKeyDaemonUserID, uuidToString(dt.UserID))
 				next.ServeHTTP(w, r.WithContext(ctx))
+				return
+			}
+
+			// MUL-195: when strict mode is on, user credentials (PAT or JWT)
+			// may only authenticate daemon-bootstrap routes. Everything else
+			// must use an mdt_ token. Default mode keeps the legacy
+			// behaviour so existing daemon installs are not bricked at deploy
+			// time; the cutover follows in a separate sub-issue.
+			if !daemonAuthFallbackAllowed(r.URL.Path, daemonAuthStrict()) {
+				slog.Warn("daemon_auth: user credential rejected on daemon route in strict mode", "path", r.URL.Path)
+				writeError(w, http.StatusUnauthorized, "daemon token required for this route")
 				return
 			}
 
