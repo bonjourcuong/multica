@@ -63,7 +63,9 @@ export type WSEventType =
   | "invitation:created"
   | "invitation:accepted"
   | "invitation:declined"
-  | "invitation:revoked";
+  | "invitation:revoked"
+  | "global_chat:message"
+  | "global_chat:dispatched";
 
 export interface WSMessage<T = unknown> {
   type: WSEventType;
@@ -176,6 +178,20 @@ export interface SubscriberRemovedPayload {
   issue_id: string;
   user_type: string;
   user_id: string;
+}
+
+/**
+ * Realtime payload pushed when a new global_chat_message lands. Mirrors
+ * `protocol.GlobalChatMessagePayload` (server/pkg/protocol/events.go).
+ * Delivered on the user-scope channel — it has no workspace_id.
+ */
+export interface GlobalChatMessageEventPayload {
+  global_session_id: string;
+  message_id: string;
+  author_kind: "user" | "agent";
+  author_id: string;
+  body: string;
+  created_at: string;
 }
 
 export interface ActivityCreatedPayload {

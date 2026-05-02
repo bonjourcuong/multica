@@ -277,6 +277,7 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 				r.Post("/", h.PostGlobalMessage)
 				r.Post("/agent-reply", h.PostGlobalAgentReply)
 			})
+			r.Get("/sessions/me/pending-task", h.GetPendingGlobalChatTask)
 			r.Get("/agents", h.ListGlobalChatAgents)
 			r.Get("/mirrors", h.ListGlobalMirrors)
 			r.Post("/cross-ws-query", h.QueryCrossWorkspaceIssues)

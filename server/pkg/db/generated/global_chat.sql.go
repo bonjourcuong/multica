@@ -99,6 +99,31 @@ func (q *Queries) GetGlobalChatSessionByUser(ctx context.Context, userID pgtype.
 	return i, err
 }
 
+const getPendingGlobalChatTask = `-- name: GetPendingGlobalChatTask :one
+SELECT id, status, agent_id FROM agent_task_queue
+WHERE global_session_id = $1 AND status IN ('queued', 'dispatched', 'running')
+ORDER BY created_at DESC
+LIMIT 1
+`
+
+type GetPendingGlobalChatTaskRow struct {
+	ID      pgtype.UUID `json:"id"`
+	Status  string      `json:"status"`
+	AgentID pgtype.UUID `json:"agent_id"`
+}
+
+// Returns the most recent in-flight task for a global chat session, if any.
+// Mirrors GetPendingChatTask but binds the lookup to global_session_id so the
+// frontend can recover the "agent is thinking" indicator after refresh /
+// reopen even when the WS event was missed. Returns agent_id so the FE can
+// attribute the indicator to the specific agent answering this turn.
+func (q *Queries) GetPendingGlobalChatTask(ctx context.Context, globalSessionID pgtype.UUID) (GetPendingGlobalChatTaskRow, error) {
+	row := q.db.QueryRow(ctx, getPendingGlobalChatTask, globalSessionID)
+	var i GetPendingGlobalChatTaskRow
+	err := row.Scan(&i.ID, &i.Status, &i.AgentID)
+	return i, err
+}
+
 const insertGlobalChatMessage = `-- name: InsertGlobalChatMessage :one
 INSERT INTO global_chat_message
     (global_session_id, author_kind, author_id, body, metadata)

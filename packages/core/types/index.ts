@@ -60,6 +60,7 @@ export type {
   GlobalChatSession,
   GlobalChatMessage,
   GlobalChatAuthorKind,
+  GlobalChatPendingTask,
   GlobalDispatchTarget,
   GlobalMirrorSummary,
 } from "./global-chat";

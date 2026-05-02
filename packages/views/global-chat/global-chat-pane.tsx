@@ -1,18 +1,27 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { Send } from "lucide-react";
 import { cn } from "@multica/ui/lib/utils";
 import { useAuthStore } from "@multica/core/auth";
 import type { SendGlobalChatMessageResponse } from "@multica/core/api";
-import type { Agent, GlobalChatMessage } from "@multica/core/types";
+import type {
+  Agent,
+  GlobalChatMessage,
+  GlobalChatMessageEventPayload,
+  GlobalChatPendingTask,
+} from "@multica/core/types";
+import { useWSEvent } from "@multica/core/realtime";
 import {
   AgentDropdown,
   AgentAvatarSmall,
 } from "../chat/components/agent-dropdown";
 import {
+  globalChatKeys,
   useGlobalChatAgents,
   useGlobalChatMessages,
+  usePendingGlobalChatTask,
   useSendGlobalChatMessage,
 } from "./use-global-chat";
 import {
@@ -48,12 +57,32 @@ export function GlobalChatPane({
 }: GlobalChatPaneProps = {}) {
   const messages = useGlobalChatMessages();
   const agents = useGlobalChatAgents();
+  const pendingTask = usePendingGlobalChatTask();
   const user = useAuthStore((s) => s.user);
   const send = useSendGlobalChatMessage({ onSubmit, onResolved, onErrored });
+  const qc = useQueryClient();
   const [draft, setDraft] = useState("");
   const [selectedAgentId, setSelectedAgentId] = useState<string | null>(null);
   const logEndRef = useRef<HTMLDivElement | null>(null);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // The "is thinking…" surface lives on the user-scope WS channel — the
+  // task lifecycle events (`task:completed` / `task:failed`) don't fan
+  // out for global chat tasks (no workspace_id, see broadcastTaskEvent),
+  // so the agent reply landing as `global_chat:message` is the canonical
+  // "done" signal. Clear pending eagerly + invalidate so the next read
+  // self-heals if the optimistic update raced the daemon.
+  const handleGlobalMessage = useCallback(
+    (payload: unknown) => {
+      const evt = payload as GlobalChatMessageEventPayload;
+      if (evt?.author_kind !== "agent") return;
+      qc.setQueryData<GlobalChatPendingTask>(globalChatKeys.pendingTask(), {});
+      qc.invalidateQueries({ queryKey: globalChatKeys.pendingTask() });
+      qc.invalidateQueries({ queryKey: globalChatKeys.messages() });
+    },
+    [qc],
+  );
+  useWSEvent("global_chat:message", handleGlobalMessage);
 
   // Resolve the default selection once the agent list loads. Re-runs if the
   // list itself changes (refetch) so a removed agent no longer keeps the
@@ -81,6 +110,8 @@ export function GlobalChatPane({
     };
   }, [selectedAgentId]);
 
+  const isPending = !!pendingTask.data?.task_id;
+
   // Autoscroll to the latest message — user expectation matches every other
   // chat surface in the app. jsdom (test env) lacks `scrollIntoView`, so we
   // feature-check before calling rather than registering a polyfill.
@@ -89,7 +120,7 @@ export function GlobalChatPane({
     if (node && typeof node.scrollIntoView === "function") {
       node.scrollIntoView({ behavior: "smooth", block: "end" });
     }
-  }, [messages.data?.length]);
+  }, [messages.data?.length, isPending]);
 
   const agentList = useMemo(() => agents.data ?? [], [agents.data]);
   const agentById = useMemo(
@@ -144,10 +175,21 @@ export function GlobalChatPane({
       >
         {messages.isLoading ? (
           <li className="text-xs text-muted-foreground">Loading…</li>
-        ) : messages.data && messages.data.length > 0 ? (
-          messages.data.map((m) => (
-            <MessageItem key={m.id} message={m} agentById={agentById} />
-          ))
+        ) : (messages.data && messages.data.length > 0) || isPending ? (
+          <>
+            {messages.data?.map((m) => (
+              <MessageItem key={m.id} message={m} agentById={agentById} />
+            ))}
+            {isPending ? (
+              <ThinkingIndicator
+                agent={
+                  (pendingTask.data?.agent_id
+                    ? agentById.get(pendingTask.data.agent_id)
+                    : null) ?? activeAgent
+                }
+              />
+            ) : null}
+          </>
         ) : (
           <li className="text-xs text-muted-foreground">
             No messages yet. Type something below to get started.
@@ -238,5 +280,45 @@ function MessageItem({
         </span>
       </div>
     </li>
+  );
+}
+
+/**
+ * Renders the "<agent> is thinking…" row while a global chat task is in
+ * flight. Mirrors the workspace chat pending bubble (chat-message-list) but
+ * is local to the global pane so this surface stays self-contained — global
+ * chat has no per-task message timeline yet (V1 only writes the final reply).
+ */
+function ThinkingIndicator({ agent }: { agent: Agent | null }) {
+  const name = agent?.name ?? "Agent";
+  return (
+    <li
+      role="status"
+      aria-live="polite"
+      data-testid="global-chat-pending"
+      className="flex items-start justify-start gap-2"
+    >
+      <AgentAvatarSmall agent={agent} />
+      <div className="flex min-w-0 flex-1 flex-col items-start">
+        <span className="px-1 text-[11px] font-medium text-muted-foreground">
+          {name}
+        </span>
+        <span className="inline-flex items-center gap-1 rounded-md bg-muted px-3 py-1.5 text-sm text-muted-foreground">
+          <span className="sr-only">{name} is thinking</span>
+          <span aria-hidden="true">{name} is thinking</span>
+          <ThinkingDots />
+        </span>
+      </div>
+    </li>
+  );
+}
+
+function ThinkingDots() {
+  return (
+    <span aria-hidden="true" className="inline-flex items-end gap-0.5">
+      <span className="size-1 rounded-full bg-current opacity-40 animate-pulse [animation-delay:-0.3s]" />
+      <span className="size-1 rounded-full bg-current opacity-60 animate-pulse [animation-delay:-0.15s]" />
+      <span className="size-1 rounded-full bg-current opacity-90 animate-pulse" />
+    </span>
   );
 }

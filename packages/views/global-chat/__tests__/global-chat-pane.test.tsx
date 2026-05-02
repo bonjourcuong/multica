@@ -1,14 +1,29 @@
 import React from "react";
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { render, fireEvent, waitFor } from "@testing-library/react";
+import { act, render, fireEvent, waitFor } from "@testing-library/react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import type {
   SendGlobalChatMessageRequest,
   SendGlobalChatMessageResponse,
 } from "@multica/core/api";
-import type { Agent, GlobalChatMessage } from "@multica/core/types";
+import type {
+  Agent,
+  GlobalChatMessage,
+  GlobalChatPendingTask,
+} from "@multica/core/types";
 import { GlobalChatPane } from "../global-chat-pane";
 import { PICKER_STORAGE_KEY } from "../agent-picker";
+
+const wsHandlers = new Map<string, (payload: unknown) => void>();
+function fireWSEvent(event: string, payload: unknown) {
+  const handler = wsHandlers.get(event);
+  handler?.(payload);
+}
+vi.mock("@multica/core/realtime", () => ({
+  useWSEvent: (event: string, handler: (payload: unknown) => void) => {
+    wsHandlers.set(event, handler);
+  },
+}));
 
 vi.mock("@multica/core/auth", () => ({
   useAuthStore: (selector: (s: { user: { id: string } }) => unknown) =>
@@ -54,6 +69,7 @@ const sendGlobalChatMessage =
   vi.fn<(payload: SendGlobalChatMessageRequest) => Promise<SendGlobalChatMessageResponse>>();
 const listGlobalChatMessages = vi.fn<() => Promise<GlobalChatMessage[]>>();
 const listGlobalChatAgents = vi.fn<() => Promise<Agent[]>>();
+const getPendingGlobalChatTask = vi.fn<() => Promise<GlobalChatPendingTask>>();
 const getGlobalChatSession = vi.fn(() =>
   Promise.resolve({
     id: "ses-1",
@@ -70,6 +86,7 @@ vi.mock("@multica/core/api", () => ({
       sendGlobalChatMessage(payload),
     listGlobalChatMessages: () => listGlobalChatMessages(),
     listGlobalChatAgents: () => listGlobalChatAgents(),
+    getPendingGlobalChatTask: () => getPendingGlobalChatTask(),
     getGlobalChatSession: () => getGlobalChatSession(),
     bootstrapGlobalChatSession: () => getGlobalChatSession(),
   },
@@ -147,6 +164,9 @@ beforeEach(() => {
     makeAgent(),
     makeAgent({ id: TWIN_ID, name: "Cuong Pho", owner_id: null }),
   ]);
+  getPendingGlobalChatTask.mockReset();
+  getPendingGlobalChatTask.mockResolvedValue({});
+  wsHandlers.clear();
   window.localStorage.clear();
 });
 
@@ -375,5 +395,88 @@ describe("GlobalChatPane — author attribution", () => {
     expect(item).not.toBeNull();
     // The user branch renders a single span and no avatar root.
     expect(item!.querySelector('[data-slot="avatar"]')).toBeNull();
+  });
+});
+
+describe("GlobalChatPane — pending-task indicator", () => {
+  it("renders the 'is thinking…' row when the server reports a pending task on mount", async () => {
+    getPendingGlobalChatTask.mockResolvedValue({
+      task_id: "task-1",
+      status: "queued",
+      agent_id: CLAUDE_ID,
+    });
+    const { findByTestId } = renderPane();
+    const row = await findByTestId("global-chat-pending");
+    expect(row.textContent).toContain("Claude Code (terminator-9999)");
+    expect(row.textContent).toContain("is thinking");
+  });
+
+  it("shows the indicator immediately after a successful send and clears it on global_chat:message", async () => {
+    sendGlobalChatMessage.mockResolvedValue(
+      makeSendResponse(makeMessage({ body: "hi" }), {
+        task_id: "task-2",
+        agent_id: CLAUDE_ID,
+      }),
+    );
+
+    const { getByTestId, findByTestId, findAllByText, queryByTestId } = renderPane();
+    await findAllByText("Claude Code (terminator-9999)");
+
+    const input = getByTestId("global-chat-input") as HTMLTextAreaElement;
+    fireEvent.change(input, { target: { value: "hi" } });
+    fireEvent.keyDown(input, { key: "Enter" });
+
+    const indicator = await findByTestId("global-chat-pending");
+    expect(indicator.textContent).toContain("Claude Code (terminator-9999)");
+
+    act(() => {
+      fireWSEvent("global_chat:message", {
+        global_session_id: "ses-1",
+        message_id: "m-99",
+        author_kind: "agent",
+        author_id: CLAUDE_ID,
+        body: "done",
+        created_at: "2026-04-28T00:00:01Z",
+      });
+    });
+
+    await waitFor(() => {
+      expect(queryByTestId("global-chat-pending")).toBeNull();
+    });
+  });
+
+  it("ignores user-authored global_chat:message events and keeps the indicator visible", async () => {
+    getPendingGlobalChatTask.mockResolvedValue({
+      task_id: "task-3",
+      status: "running",
+      agent_id: CLAUDE_ID,
+    });
+
+    const { findByTestId, queryByTestId } = renderPane();
+    await findByTestId("global-chat-pending");
+
+    act(() => {
+      fireWSEvent("global_chat:message", {
+        global_session_id: "ses-1",
+        message_id: "m-100",
+        author_kind: "user",
+        author_id: "u-1",
+        body: "another draft",
+        created_at: "2026-04-28T00:00:02Z",
+      });
+    });
+
+    expect(queryByTestId("global-chat-pending")).not.toBeNull();
+  });
+
+  it("falls back to the active picker agent when the pending task has no agent_id", async () => {
+    getPendingGlobalChatTask.mockResolvedValue({
+      task_id: "task-4",
+      status: "queued",
+    });
+    const { findByTestId } = renderPane();
+    const row = await findByTestId("global-chat-pending");
+    // Default picker resolution lands on Claude Code.
+    expect(row.textContent).toContain("Claude Code (terminator-9999)");
   });
 });
