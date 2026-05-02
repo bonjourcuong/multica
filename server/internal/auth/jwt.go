@@ -5,8 +5,9 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"os"
 	"sync"
+
+	"github.com/multica-ai/multica/server/internal/secrets"
 )
 
 const defaultJWTSecret = "multica-dev-secret-change-in-production"
@@ -18,7 +19,7 @@ var (
 
 func JWTSecret() []byte {
 	jwtSecretOnce.Do(func() {
-		secret := os.Getenv("JWT_SECRET")
+		secret := secrets.FromFileOrEnv("JWT_SECRET")
 		if secret == "" {
 			secret = defaultJWTSecret
 		}

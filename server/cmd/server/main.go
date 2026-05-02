@@ -15,6 +15,7 @@ import (
 	"github.com/multica-ai/multica/server/internal/events"
 	"github.com/multica-ai/multica/server/internal/logger"
 	"github.com/multica-ai/multica/server/internal/realtime"
+	"github.com/multica-ai/multica/server/internal/secrets"
 	"github.com/multica-ai/multica/server/internal/service"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 	"github.com/redis/go-redis/v9"
@@ -111,11 +112,13 @@ func envDuration(name string, def time.Duration) time.Duration {
 func main() {
 	logger.Init()
 
-	// Warn about missing configuration
-	if os.Getenv("JWT_SECRET") == "" {
-		slog.Warn("JWT_SECRET is not set — using insecure default. Set JWT_SECRET for production use.")
+	// Warn about missing configuration. Both values support a Docker
+	// file-backed secret at /run/secrets/<lowercase(name)> with env fallback,
+	// so check the resolved value rather than the raw env var.
+	if secrets.FromFileOrEnv("JWT_SECRET") == "" {
+		slog.Warn("JWT_SECRET is not set — using insecure default. Set JWT_SECRET (env or /run/secrets/jwt_secret) for production use.")
 	}
-	if os.Getenv("RESEND_API_KEY") == "" {
+	if secrets.FromFileOrEnv("RESEND_API_KEY") == "" {
 		slog.Warn("RESEND_API_KEY is not set — email verification codes will be printed to the log instead of emailed.")
 	}
 
