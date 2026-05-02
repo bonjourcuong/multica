@@ -8,6 +8,7 @@ import (
 	"unicode"
 	"unicode/utf8"
 
+	"github.com/multica-ai/multica/server/internal/secrets"
 	"github.com/resend/resend-go/v2"
 )
 
@@ -22,7 +23,7 @@ type EmailService struct {
 }
 
 func NewEmailService() *EmailService {
-	apiKey := os.Getenv("RESEND_API_KEY")
+	apiKey := secrets.FromFileOrEnv("RESEND_API_KEY")
 	from := os.Getenv("RESEND_FROM_EMAIL")
 	if from == "" {
 		from = "noreply@multica.ai"
