@@ -175,11 +175,12 @@ func (h *Handler) ListGlobalMessages(w http.ResponseWriter, r *http.Request) {
 // returns the persisted message + per-target dispatch outcome.
 //
 // V3 (MUL-137) added an optional `agent_id` to the request body: when
-// present, the message is also enqueued as a global chat task targeted
-// at that agent so a runtime authors the reply (the existing V1 mention
-// fan-out continues to run independently). Missing `agent_id` keeps the
-// V1 path unchanged — the FE picker just doesn't send it on first load,
-// and old clients are unaffected.
+// present, the message is enqueued as a global chat task targeted at
+// that agent so a runtime authors the reply (the V1 mention fan-out
+// continues to run independently). MUL-156 extends this so the handler
+// also enqueues a default task — targeted at the session's twin — when
+// `agent_id` is omitted, otherwise the orchestrator never receives a
+// non-mention message and the global chat sits silent.
 func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 	userID, ok := requireUserID(w, r)
 	if !ok {
@@ -277,32 +278,52 @@ func (h *Handler) PostGlobalMessage(w http.ResponseWriter, r *http.Request) {
 		h.GlobalChat.PublishDispatched(user, msg.ID, dispatch)
 	}
 
-	// V3 picker: enqueue the agent task LAST so a runtime/queue failure
-	// doesn't roll back the user's message or the mention fan-out (both
-	// of which already succeeded). The frontend gets task_id back so it
-	// can show a pending indicator while the daemon picks up the task.
+	// Enqueue the agent task LAST so a runtime/queue failure doesn't roll
+	// back the user's message or the mention fan-out (both of which
+	// already succeeded). The frontend gets task_id back so it can show a
+	// pending indicator while the daemon picks up the task.
+	//
+	// MUL-156: when no explicit agent_id was sent, default to the
+	// session's bound twin so every message reaches the orchestrator,
+	// not just messages from clients that hit the V3 picker.
 	resp := GlobalChatPostResponse{
 		Message:  globalMessageToResponse(msg),
 		Dispatch: dispatch,
 		Mentions: echoes,
 	}
+	sess, err := h.GlobalChat.GetSession(r.Context(), user)
+	if err != nil {
+		slog.Error("post global message: load session for task failed",
+			"user_id", userID, "error", err)
+		writeError(w, http.StatusInternalServerError, "failed to load global chat session")
+		return
+	}
+	taskAgentID := pgtype.UUID{}
 	if pickedAgent != nil {
-		sess, err := h.GlobalChat.GetSession(r.Context(), user)
+		taskAgentID = pickedAgent.ID
+	} else {
+		taskAgentID = sess.AgentID
+	}
+	if taskAgentID.Valid {
+		task, err := h.TaskService.EnqueueGlobalChatTask(r.Context(), sess, taskAgentID)
 		if err != nil {
-			slog.Error("post global message: load session for task failed",
-				"user_id", userID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to enqueue agent task")
-			return
+			// When the default twin is missing a runtime (legacy row not
+			// yet reseeded), don't 500 the user — the message is already
+			// persisted and the mention fan-out has run. Log + continue
+			// so the FE still receives a 201 and can render the message.
+			if pickedAgent == nil {
+				slog.Warn("post global message: default twin task skipped",
+					"user_id", userID, "agent_id", uuidToString(taskAgentID), "error", err)
+			} else {
+				slog.Error("post global message: enqueue task failed",
+					"user_id", userID, "agent_id", req.AgentID, "error", err)
+				writeError(w, http.StatusInternalServerError, "failed to enqueue agent task: "+err.Error())
+				return
+			}
+		} else {
+			resp.TaskID = uuidToString(task.ID)
+			resp.AgentID = uuidToString(taskAgentID)
 		}
-		task, err := h.TaskService.EnqueueGlobalChatTask(r.Context(), sess, pickedAgent.ID)
-		if err != nil {
-			slog.Error("post global message: enqueue task failed",
-				"user_id", userID, "agent_id", req.AgentID, "error", err)
-			writeError(w, http.StatusInternalServerError, "failed to enqueue agent task: "+err.Error())
-			return
-		}
-		resp.TaskID = uuidToString(task.ID)
-		resp.AgentID = uuidToString(pickedAgent.ID)
 	}
 
 	writeJSON(w, http.StatusCreated, resp)

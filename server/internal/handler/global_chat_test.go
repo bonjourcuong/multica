@@ -325,11 +325,15 @@ func TestListGlobalChatAgents_IsolatesByUser(t *testing.T) {
 	}
 }
 
-func TestPostGlobalMessage_NoAgentIdFallsThroughToV1(t *testing.T) {
+// MUL-156: a POST without agent_id must still enqueue a task, defaulting
+// to the session's bound twin so the orchestrator gets every message.
+// The fixture seeds the canonical local runtime, so ensureGlobalAgent
+// binds the twin to it and the daemon can claim the resulting task.
+func TestPostGlobalMessage_NoAgentIdEnqueuesTwinTask(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("no test handler")
 	}
-	setupGlobalAgentsFixture(t, testPool, testUserID)
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
 
 	w := httptest.NewRecorder()
 	req := newRequest("POST", "/api/global/chat/sessions/me/messages", map[string]any{
@@ -343,18 +347,26 @@ func TestPostGlobalMessage_NoAgentIdFallsThroughToV1(t *testing.T) {
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if v, ok := resp["task_id"].(string); ok && v != "" {
-		t.Fatalf("expected no task_id in V1 fallback, got %q", v)
+	taskID, _ := resp["task_id"].(string)
+	if taskID == "" {
+		t.Fatalf("expected task_id, got %s", w.Body.String())
 	}
-	// No row should be enqueued.
-	var n int
+	if got, _ := resp["agent_id"].(string); got != f.TwinAgentID {
+		t.Fatalf("agent_id mismatch: got %q want twin %q", got, f.TwinAgentID)
+	}
+
+	var globalSessionID, agentID string
 	if err := testPool.QueryRow(context.Background(),
-		`SELECT count(*) FROM agent_task_queue WHERE global_session_id IS NOT NULL`,
-	).Scan(&n); err != nil {
-		t.Fatalf("count tasks: %v", err)
+		`SELECT global_session_id::text, agent_id::text FROM agent_task_queue WHERE id = $1`,
+		taskID,
+	).Scan(&globalSessionID, &agentID); err != nil {
+		t.Fatalf("load task row: %v", err)
 	}
-	if n != 0 {
-		t.Fatalf("expected 0 global chat tasks enqueued, got %d", n)
+	if globalSessionID != f.GlobalSessionID {
+		t.Errorf("global_session_id = %s, want %s", globalSessionID, f.GlobalSessionID)
+	}
+	if agentID != f.TwinAgentID {
+		t.Errorf("agent_id = %s, want twin %s", agentID, f.TwinAgentID)
 	}
 }
 
