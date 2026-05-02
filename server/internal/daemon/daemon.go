@@ -1107,6 +1107,12 @@ func (d *Daemon) runTask(ctx context.Context, task Task, provider string, taskLo
 	if task.AutopilotID != "" {
 		agentEnv["MULTICA_AUTOPILOT_ID"] = task.AutopilotID
 	}
+	// Global chat tasks (V3, MUL-137): expose the session ID so the
+	// orchestrator agent can call `multica global-chat reply` without
+	// having to round-trip GET /api/global/chat/sessions/me first.
+	if task.GlobalSessionID != "" {
+		agentEnv["MULTICA_GLOBAL_SESSION_ID"] = task.GlobalSessionID
+	}
 	// Ensure the multica CLI is on PATH inside the agent's environment.
 	// Some runtimes (e.g. Codex) run in an isolated sandbox that may not
 	// inherit the daemon's PATH. Prepend the directory of the running

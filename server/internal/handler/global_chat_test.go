@@ -475,6 +475,141 @@ func TestPostGlobalMessage_RejectsArchivedAgent(t *testing.T) {
 	}
 }
 
+// --- agent reply (MUL-158) ------------------------------------------------
+
+func TestPostGlobalAgentReply_PersistsAsAgent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages/agent-reply", map[string]any{
+		"content":  "interim update from the agent",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	testHandler.PostGlobalAgentReply(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("unmarshal: %v (%s)", err, w.Body.String())
+	}
+	if got, _ := resp["author_kind"].(string); got != "agent" {
+		t.Errorf("author_kind = %q, want agent", got)
+	}
+	if got, _ := resp["author_id"].(string); got != f.ClaudeCodeAgentID {
+		t.Errorf("author_id = %q, want %q", got, f.ClaudeCodeAgentID)
+	}
+	if got, _ := resp["body"].(string); got != "interim update from the agent" {
+		t.Errorf("body mismatch: %q", got)
+	}
+
+	// Verify persistence: the message lands on the user's global session.
+	var n int
+	if err := testPool.QueryRow(context.Background(),
+		`SELECT count(*) FROM global_chat_message
+		 WHERE global_session_id = $1 AND author_kind = 'agent' AND author_id = $2`,
+		f.GlobalSessionID, f.ClaudeCodeAgentID,
+	).Scan(&n); err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if n != 1 {
+		t.Errorf("expected 1 agent message persisted, got %d", n)
+	}
+}
+
+func TestPostGlobalAgentReply_AgentIDFromHeader(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	body := bytesBuffer(map[string]any{"content": "from header"})
+	req := httptest.NewRequest("POST", "/api/global/chat/sessions/me/messages/agent-reply", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", testUserID)
+	req.Header.Set("X-Agent-ID", f.ClaudeCodeAgentID)
+	testHandler.PostGlobalAgentReply(w, req)
+	if w.Code != http.StatusCreated {
+		t.Fatalf("expected 201, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp map[string]any
+	json.Unmarshal(w.Body.Bytes(), &resp)
+	if got, _ := resp["author_id"].(string); got != f.ClaudeCodeAgentID {
+		t.Errorf("author_id = %q, want %q", got, f.ClaudeCodeAgentID)
+	}
+}
+
+func TestPostGlobalAgentReply_MissingAgentID(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages/agent-reply", map[string]any{
+		"content": "no agent id",
+	})
+	testHandler.PostGlobalAgentReply(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for missing agent_id, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostGlobalAgentReply_RejectsCrossUserAgent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	// Stranger tries to post a reply attributed to the test user's global agent.
+	ctx := context.Background()
+	uniq := fmt.Sprintf("%d", time.Now().UnixNano())
+	var strangerID string
+	if err := testPool.QueryRow(ctx, `
+		INSERT INTO "user" (name, email) VALUES ($1, $2) RETURNING id
+	`, "Reply Stranger "+uniq, "reply-stranger-"+uniq+"@multica.ai").Scan(&strangerID); err != nil {
+		t.Fatalf("create stranger: %v", err)
+	}
+	t.Cleanup(func() {
+		testPool.Exec(context.Background(), `DELETE FROM "user" WHERE id = $1`, strangerID)
+	})
+
+	w := httptest.NewRecorder()
+	body := bytesBuffer(map[string]any{
+		"content":  "spoofed",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	req := httptest.NewRequest("POST", "/api/global/chat/sessions/me/messages/agent-reply", body)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-User-ID", strangerID)
+	testHandler.PostGlobalAgentReply(w, req)
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("expected 404 for cross-user agent, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestPostGlobalAgentReply_EmptyContent(t *testing.T) {
+	if testHandler == nil {
+		t.Skip("no test handler")
+	}
+	f := setupGlobalAgentsFixture(t, testPool, testUserID)
+
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/global/chat/sessions/me/messages/agent-reply", map[string]any{
+		"content":  "",
+		"agent_id": f.ClaudeCodeAgentID,
+	})
+	testHandler.PostGlobalAgentReply(w, req)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("expected 400 for empty content, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 func TestListGlobalChatAgents_ParseUUIDOK(t *testing.T) {
 	// Smoke: parseUUID must accept the seeded agent IDs (catches a
 	// regression where the helper would silently mark them invalid).

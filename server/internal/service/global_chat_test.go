@@ -500,6 +500,66 @@ func TestGetGlobalAgentForUser_RejectsCrossUserAgent(t *testing.T) {
 	}
 }
 
+func TestPostAgentReply_PersistsAndPublishesAsAgent(t *testing.T) {
+	ctx := context.Background()
+	user := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(user)] = db.User{ID: user, Name: "Cuong"}
+	bus := &capturingBus{}
+	svc := NewGlobalChatService(f, bus)
+
+	if _, err := svc.EnsureSession(ctx, user); err != nil {
+		t.Fatal(err)
+	}
+	agents, _ := svc.ListGlobalAgents(ctx, user)
+	if len(agents) == 0 {
+		t.Fatal("seed failed: no agents")
+	}
+	agent := agents[0]
+
+	bus.events = nil
+	msg, err := svc.PostAgentReply(ctx, user, agent.ID, "interim update", nil)
+	if err != nil {
+		t.Fatalf("PostAgentReply: %v", err)
+	}
+	if msg.AuthorKind != "agent" {
+		t.Errorf("author_kind = %q, want agent", msg.AuthorKind)
+	}
+	if msg.AuthorID != agent.ID {
+		t.Errorf("author_id mismatch")
+	}
+	if msg.Body != "interim update" {
+		t.Errorf("body not persisted")
+	}
+	if len(bus.events) != 1 || bus.events[0].Type != protocol.EventGlobalChatMessage {
+		t.Fatalf("expected 1 global_chat:message event, got %+v", bus.events)
+	}
+}
+
+func TestPostAgentReply_RejectsCrossUserAgent(t *testing.T) {
+	ctx := context.Background()
+	owner := mustNewUUID()
+	stranger := mustNewUUID()
+	f := newFakeGlobalChat()
+	f.users[uuidValue(owner)] = db.User{ID: owner, Name: "Cuong"}
+	f.users[uuidValue(stranger)] = db.User{ID: stranger, Name: "Stranger"}
+
+	svc := NewGlobalChatService(f, &capturingBus{})
+	if _, err := svc.EnsureSession(ctx, owner); err != nil {
+		t.Fatal(err)
+	}
+	ownerAgents, _ := svc.ListGlobalAgents(ctx, owner)
+	if len(ownerAgents) == 0 {
+		t.Fatal("seed failed")
+	}
+
+	// Stranger tries to post as if they were the owner's agent.
+	_, err := svc.PostAgentReply(ctx, stranger, ownerAgents[0].ID, "spoofed", nil)
+	if !errors.Is(err, pgx.ErrNoRows) {
+		t.Fatalf("expected pgx.ErrNoRows for cross-user reply, got %v", err)
+	}
+}
+
 func TestPublishDispatched_EmitsEvent(t *testing.T) {
 	user := mustNewUUID()
 	msgID := mustNewUUID()

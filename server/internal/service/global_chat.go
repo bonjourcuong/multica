@@ -353,6 +353,27 @@ func (s *GlobalChatService) PostAgentMessage(
 	return msg, nil
 }
 
+// PostAgentReply persists an interim agent message into the user's global
+// chat session and publishes the per-user realtime event. Backs the CLI
+// `multica global-chat reply` command (MUL-158): orchestrators running
+// inside a daemon-managed task call this to stream replies into the chat
+// pane, alongside the final `CompleteTask` writeback that lands the
+// session's terminal output. agentID must be one of the user's global
+// agents — workspace agents and other users' globals are rejected with
+// pgx.ErrNoRows so a probing caller cannot enumerate cross-user IDs
+// (same collapsing as GetGlobalAgentForUser).
+func (s *GlobalChatService) PostAgentReply(
+	ctx context.Context,
+	userID, agentID pgtype.UUID,
+	body string,
+	metadata []byte,
+) (db.GlobalChatMessage, error) {
+	if _, err := s.GetGlobalAgentForUser(ctx, userID, agentID); err != nil {
+		return db.GlobalChatMessage{}, err
+	}
+	return s.PostAgentMessage(ctx, userID, agentID, body, metadata)
+}
+
 // ParseMentions extracts every @workspace[:agent] reference from body. Used
 // by handlers / agent tool to fan out a global message into workspace
 // mirror sessions.
