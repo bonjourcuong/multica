@@ -3,6 +3,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/multica-ai/multica/server/internal/auth"
 )
 
@@ -187,11 +191,32 @@ func TestCreateDaemonToken_NonMemberWorkspace(t *testing.T) {
 		"workspace_id": otherWorkspaceID,
 		"daemon_id":    daemonID,
 	})
-	if w.Code != http.StatusNotFound {
-		t.Fatalf("expected 404 for non-member workspace, got %d: %s", w.Code, w.Body.String())
+	if w.Code != http.StatusForbidden {
+		t.Fatalf("expected 403 for non-member workspace, got %d: %s", w.Code, w.Body.String())
 	}
+	// Body must be the same opaque "forbidden" the ownership-rejection branches
+	// emit (ADR D9 §"daemon_id ownership validation"). Locks the invariant
+	// that a caller cannot distinguish "workspace doesn't exist" from
+	// "you're not a member" from "daemon belongs to someone else".
+	assertOpaqueForbidden(t, w)
 	if n := dtCountRows(t, daemonID); n != 0 {
 		t.Errorf("expected no rows after rejected mint, got %d", n)
+	}
+}
+
+// assertOpaqueForbidden checks that a 403 response carries the canonical
+// {"error":"forbidden"} body the daemon-token handler emits for membership
+// and ownership rejections alike. Used by tests 2, 4, and 5 so any future
+// drift in one branch's body shape (e.g. adding a leak-y "reason" field)
+// fails the opaqueness invariant immediately.
+func assertOpaqueForbidden(t *testing.T, w *httptest.ResponseRecorder) {
+	t.Helper()
+	var body map[string]string
+	if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode forbidden body: %v (raw: %s)", err, w.Body.String())
+	}
+	if body["error"] != "forbidden" || len(body) != 1 {
+		t.Errorf("expected body {\"error\":\"forbidden\"} only, got %v", body)
 	}
 }
 
@@ -270,6 +295,7 @@ func TestCreateDaemonToken_CrossUser_AgentRuntimeOwned(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 cross-user via agent_runtime, got %d: %s", w.Code, w.Body.String())
 	}
+	assertOpaqueForbidden(t, w)
 	if n := dtCountRows(t, daemonID); n != 0 {
 		t.Errorf("expected no daemon_token row after rejected mint, got %d", n)
 	}
@@ -305,6 +331,7 @@ func TestCreateDaemonToken_CrossUser_DaemonTokenOwned(t *testing.T) {
 	if w.Code != http.StatusForbidden {
 		t.Fatalf("expected 403 cross-user via daemon_token, got %d: %s", w.Code, w.Body.String())
 	}
+	assertOpaqueForbidden(t, w)
 
 	// Alice's row must still be intact — Bob's rejected mint must not have
 	// touched it.
@@ -320,10 +347,26 @@ func TestCreateDaemonToken_CrossUser_DaemonTokenOwned(t *testing.T) {
 	}
 }
 
-// 6. Torn rotation — call rotateDaemonToken with an already-cancelled
-//    context. Whichever DB op trips the cancellation first, the deferred
-//    Rollback must restore the prior state. Verifies the rollback invariant
-//    of the transaction wrap (ADR D9 §"Transaction-wrapped rotation").
+// 6. Torn rotation — exercise the rollback path that the ADR D9
+//    §"Transaction-wrapped rotation" wrap is supposed to protect.
+//
+//    The cancel-before-call pattern from the prior revision short-circuited
+//    the whole rotation (the very first pgx op observed the cancellation),
+//    so the wrap was never put under load. Bruce flagged this on PR #57.
+//
+//    This rewrite injects the failure inside the transaction, after Delete
+//    commits but before Create commits, via a pgx.Tx shim that lets the
+//    sqlc-generated `q.db.Exec(...)` for Delete pass through to the real
+//    transaction and forces the next `q.db.QueryRow(...)` (Create) to fail.
+//    The deferred Rollback then has real work to do — undoing the Delete —
+//    which is exactly the invariant the wrap exists for.
+//
+//    Drives the request through CreateDaemonToken so the four assertions
+//    Maria's spec calls out can all be made:
+//      (a) count(*) FROM daemon_token WHERE (workspace, daemon) is exactly 1
+//      (b) surviving row's token_hash and user_id match pre-rotation values
+//      (c) handler returns 500
+//      (d) no orphaned rows (covered by (a) + (b))
 func TestCreateDaemonToken_TornRotationRollsBack(t *testing.T) {
 	if testHandler == nil {
 		t.Skip("database not available")
@@ -332,7 +375,8 @@ func TestCreateDaemonToken_TornRotationRollsBack(t *testing.T) {
 	dtCleanupRows(t, daemonID)
 
 	// Pre-seed the existing token (the "live" row that rotation must not
-	// destroy if it can't replace it).
+	// destroy if it can't replace it). user_id matches the caller so the
+	// step-3 ownership validation passes and rotation actually starts.
 	const preHash = "pre-rotate-hash-"
 	preHashFull := preHash + daemonID
 	if _, err := testPool.Exec(context.Background(), `
@@ -343,31 +387,40 @@ func TestCreateDaemonToken_TornRotationRollsBack(t *testing.T) {
 		t.Fatalf("seed pre-rotation row: %v", err)
 	}
 
-	// Cancel the context up-front so the next pgx call observes the
-	// cancellation and the deferred Rollback restores state.
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	// Build a handler clone whose TxStarter wraps testPool with a shim that
+	// forces the first QueryRow inside any rotation tx to return an error.
+	// Everything else (validation queries against h.Queries on the pool, the
+	// real Delete inside the tx) runs against the unmodified pool.
+	tornStarter := &tornRotationTxStarter{inner: testPool}
+	hClone := *testHandler
+	hClone.TxStarter = tornStarter
 
-	rawToken, err := auth.GenerateDaemonToken()
-	if err != nil {
-		t.Fatalf("generate token: %v", err)
+	w := httptest.NewRecorder()
+	req := newRequest("POST", "/api/daemon-tokens", map[string]any{
+		"workspace_id": testWorkspaceID,
+		"daemon_id":    daemonID,
+	})
+	hClone.CreateDaemonToken(w, req)
+
+	// (c) handler returns 500
+	if w.Code != http.StatusInternalServerError {
+		t.Fatalf("expected 500 from torn rotation, got %d: %s", w.Code, w.Body.String())
 	}
-	_, err = testHandler.rotateDaemonToken(
-		ctx,
-		parseUUID(testWorkspaceID),
-		daemonID,
-		parseUUID(testUserID),
-		rawToken,
-		time.Now().Add(90*24*time.Hour),
-	)
-	if err == nil {
-		t.Fatalf("expected error from torn rotation, got nil")
+	// Confirm the shim actually fired — guards against a future refactor that
+	// reorders the rotation pair (Delete before Create) silently making this
+	// test pass without ever exercising the rollback.
+	if !tornStarter.deleteRan() {
+		t.Fatal("shim never observed the Delete inside the tx — torn-rotation canary did not exercise the rollback")
+	}
+	if !tornStarter.createBlocked() {
+		t.Fatal("shim never blocked the Create inside the tx — torn-rotation canary did not exercise the rollback")
 	}
 
-	// Original row survives intact.
+	// (a) + (d) exactly one row remains, no orphans
 	if n := dtCountRows(t, daemonID); n != 1 {
 		t.Errorf("expected 1 row after torn rotation (original preserved), got %d", n)
 	}
+	// (b) surviving row matches the pre-rotation values
 	gotHash, gotUser := dtFetchSingleRow(t, daemonID)
 	if gotHash != preHashFull {
 		t.Errorf("original token_hash mutated: got %q, want %q", gotHash, preHashFull)
@@ -376,3 +429,74 @@ func TestCreateDaemonToken_TornRotationRollsBack(t *testing.T) {
 		t.Errorf("original user_id mutated: got %s, want %s", gotUser, testUserID)
 	}
 }
+
+// errSimulatedTornRotation is the synthetic failure the torn-rotation shim
+// injects between Delete and Create. Picked as a sentinel so a future test
+// reading handler logs can grep for it unambiguously.
+var errSimulatedTornRotation = errors.New("simulated create failure after delete")
+
+// tornRotationTxStarter wraps a pgxpool so transactions it opens get the
+// torn-rotation shim layered on. Used only by TestCreateDaemonToken_
+// TornRotationRollsBack. The shim is per-tx so concurrent tests are
+// unaffected.
+type tornRotationTxStarter struct {
+	inner *pgxpool.Pool
+	// observed is the most recently created shim tx. Stored so the test can
+	// assert the Delete-then-Create path actually ran. We only ever expect
+	// one tx per test invocation (rotateDaemonToken opens exactly one).
+	observed *tornRotationTx
+}
+
+func (s *tornRotationTxStarter) Begin(ctx context.Context) (pgx.Tx, error) {
+	tx, err := s.inner.Begin(ctx)
+	if err != nil {
+		return nil, err
+	}
+	shim := &tornRotationTx{Tx: tx}
+	s.observed = shim
+	return shim, nil
+}
+
+func (s *tornRotationTxStarter) deleteRan() bool {
+	return s.observed != nil && s.observed.deleteSeen
+}
+
+func (s *tornRotationTxStarter) createBlocked() bool {
+	return s.observed != nil && s.observed.createBlocked
+}
+
+// tornRotationTx implements pgx.Tx by embedding the real tx and overriding
+// the two methods sqlc uses for Delete/Create. Exec is the Delete path
+// (`-- name: DeleteDaemonTokensByWorkspaceAndDaemon :exec`), QueryRow is the
+// Create path (`-- name: CreateDaemonToken :one`). We let Delete commit
+// inside the tx, then synthesise a failure on the next QueryRow so Create
+// never runs — the deferred Rollback in rotateDaemonToken then has real
+// state to undo.
+type tornRotationTx struct {
+	pgx.Tx
+	deleteSeen    bool
+	createBlocked bool
+}
+
+func (t *tornRotationTx) Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error) {
+	tag, err := t.Tx.Exec(ctx, sql, args...)
+	if err == nil && strings.Contains(sql, "DeleteDaemonTokensByWorkspaceAndDaemon") {
+		t.deleteSeen = true
+	}
+	return tag, err
+}
+
+func (t *tornRotationTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row {
+	if t.deleteSeen && strings.Contains(sql, "CreateDaemonToken") {
+		t.createBlocked = true
+		return errRow{err: errSimulatedTornRotation}
+	}
+	return t.Tx.QueryRow(ctx, sql, args...)
+}
+
+// errRow is a pgx.Row that returns a fixed error from Scan. Used by the
+// torn-rotation shim to make the Create branch fail without round-tripping
+// to Postgres.
+type errRow struct{ err error }
+
+func (e errRow) Scan(dest ...any) error { return e.err }

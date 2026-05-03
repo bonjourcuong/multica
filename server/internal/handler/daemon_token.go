@@ -73,10 +73,15 @@ func (h *Handler) CreateDaemonToken(w http.ResponseWriter, r *http.Request) {
 		expiresInDays = *req.ExpiresInDays
 	}
 
-	// Step 1 — workspace membership. requireWorkspaceMember writes a 404 on
-	// miss, which matches the existing pattern in requireDaemonWorkspaceAccess
-	// (anti-enumeration: don't leak whether the workspace exists).
-	if _, ok := h.requireWorkspaceMember(w, r, req.WorkspaceID, "not found"); !ok {
+	// Step 1 — workspace membership. Reject with the same opaque "forbidden"
+	// body the step 2/3 ownership branches use, so a caller cannot distinguish
+	// "workspace doesn't exist" from "you're not a member" from "daemon belongs
+	// to someone else". requireWorkspaceMember would write a 404 with a custom
+	// message and break that invariant.
+	if _, err := h.getWorkspaceMember(r.Context(), userID, req.WorkspaceID); err != nil {
+		slog.Warn("daemon_token: workspace membership rejected",
+			"workspace_id", req.WorkspaceID, "daemon_id", req.DaemonID, "caller", userID)
+		writeError(w, http.StatusForbidden, "forbidden")
 		return
 	}
 
