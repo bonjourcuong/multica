@@ -295,6 +295,12 @@ func NewRouter(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus, analytics
 			r.Delete("/{id}", h.RevokePersonalAccessToken)
 		})
 
+		// Daemon-token mint endpoint (MUL-201, ADR 2026-05-03). User-scoped
+		// by definition: a daemon token cannot bootstrap itself, so the mint
+		// must be authenticated by the user's PAT/JWT — same auth surface as
+		// /api/tokens above.
+		r.Post("/api/daemon-tokens", h.CreateDaemonToken)
+
 		// --- Workspace-scoped routes (all require workspace membership) ---
 		r.Group(func(r chi.Router) {
 			r.Use(middleware.RequireWorkspaceMember(queries))

@@ -296,6 +296,49 @@ func (q *Queries) GetAgentRuntimeForWorkspace(ctx context.Context, arg GetAgentR
 	return i, err
 }
 
+const listAgentRuntimeOwnersByWorkspaceAndDaemon = `-- name: ListAgentRuntimeOwnersByWorkspaceAndDaemon :many
+SELECT DISTINCT owner_id
+FROM agent_runtime
+WHERE workspace_id = $1
+  AND daemon_id = $2
+  AND owner_id IS NOT NULL
+`
+
+type ListAgentRuntimeOwnersByWorkspaceAndDaemonParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    pgtype.Text `json:"daemon_id"`
+}
+
+// Used by the daemon-token mint handler to reject cross-user same-daemon_id
+// mints (MUL-201, ADR 2026-05-03 D9 step 2). Returns distinct non-null
+// owner_ids for the (workspace_id, daemon_id) pair. Standard SQL `=`
+// semantics: rows with a NULL daemon_id are excluded automatically (no
+// IS NOT DISTINCT FROM), which is exactly what we want — a NULL-daemon_id
+// row carries no ownership claim against a concrete daemon_id.
+//
+// The unique constraint UNIQUE (workspace_id, daemon_id, provider) creates a
+// composite B-tree, so this lookup uses the (workspace_id, daemon_id) prefix
+// — index-supported, not a workspace-wide partition scan.
+func (q *Queries) ListAgentRuntimeOwnersByWorkspaceAndDaemon(ctx context.Context, arg ListAgentRuntimeOwnersByWorkspaceAndDaemonParams) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listAgentRuntimeOwnersByWorkspaceAndDaemon, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []pgtype.UUID{}
+	for rows.Next() {
+		var owner_id pgtype.UUID
+		if err := rows.Scan(&owner_id); err != nil {
+			return nil, err
+		}
+		items = append(items, owner_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listAgentRuntimes = `-- name: ListAgentRuntimes :many
 SELECT id, workspace_id, daemon_id, name, runtime_mode, provider, status, device_info, metadata, last_seen_at, created_at, updated_at, owner_id, legacy_daemon_id FROM agent_runtime
 WHERE workspace_id = $1

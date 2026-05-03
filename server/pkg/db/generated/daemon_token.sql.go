@@ -14,7 +14,7 @@ import (
 const createDaemonToken = `-- name: CreateDaemonToken :one
 INSERT INTO daemon_token (token_hash, workspace_id, daemon_id, user_id, expires_at)
 VALUES ($1, $2, $3, $4, $5)
-RETURNING id, token_hash, workspace_id, daemon_id, user_id, expires_at, created_at
+RETURNING id, token_hash, workspace_id, daemon_id, expires_at, created_at, user_id
 `
 
 type CreateDaemonTokenParams struct {
@@ -39,9 +39,9 @@ func (q *Queries) CreateDaemonToken(ctx context.Context, arg CreateDaemonTokenPa
 		&i.TokenHash,
 		&i.WorkspaceID,
 		&i.DaemonID,
-		&i.UserID,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.UserID,
 	)
 	return i, err
 }
@@ -72,7 +72,7 @@ func (q *Queries) DeleteExpiredDaemonTokens(ctx context.Context) error {
 }
 
 const getDaemonTokenByHash = `-- name: GetDaemonTokenByHash :one
-SELECT id, token_hash, workspace_id, daemon_id, user_id, expires_at, created_at FROM daemon_token
+SELECT id, token_hash, workspace_id, daemon_id, expires_at, created_at, user_id FROM daemon_token
 WHERE token_hash = $1 AND expires_at > now()
 `
 
@@ -84,9 +84,51 @@ func (q *Queries) GetDaemonTokenByHash(ctx context.Context, tokenHash string) (D
 		&i.TokenHash,
 		&i.WorkspaceID,
 		&i.DaemonID,
-		&i.UserID,
 		&i.ExpiresAt,
 		&i.CreatedAt,
+		&i.UserID,
 	)
 	return i, err
+}
+
+const listDaemonTokensByWorkspaceAndDaemon = `-- name: ListDaemonTokensByWorkspaceAndDaemon :many
+SELECT id, token_hash, workspace_id, daemon_id, expires_at, created_at, user_id FROM daemon_token
+WHERE workspace_id = $1 AND daemon_id = $2
+`
+
+type ListDaemonTokensByWorkspaceAndDaemonParams struct {
+	WorkspaceID pgtype.UUID `json:"workspace_id"`
+	DaemonID    string      `json:"daemon_id"`
+}
+
+// Used by the mint handler to reject cross-user same-daemon_id mints
+// (MUL-201, ADR 2026-05-03 D9 step 3). Standard SQL `=` semantics; NULL
+// daemon_id rows would be excluded automatically (the column is NOT NULL,
+// so this is moot today, but the comment pins the contract).
+func (q *Queries) ListDaemonTokensByWorkspaceAndDaemon(ctx context.Context, arg ListDaemonTokensByWorkspaceAndDaemonParams) ([]DaemonToken, error) {
+	rows, err := q.db.Query(ctx, listDaemonTokensByWorkspaceAndDaemon, arg.WorkspaceID, arg.DaemonID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items := []DaemonToken{}
+	for rows.Next() {
+		var i DaemonToken
+		if err := rows.Scan(
+			&i.ID,
+			&i.TokenHash,
+			&i.WorkspaceID,
+			&i.DaemonID,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.UserID,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
