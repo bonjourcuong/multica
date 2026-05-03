@@ -89,6 +89,23 @@ LIMIT 1;
 -- name: DeleteAgentRuntime :exec
 DELETE FROM agent_runtime WHERE id = $1;
 
+-- name: ListAgentRuntimeOwnersByWorkspaceAndDaemon :many
+-- Used by the daemon-token mint handler to reject cross-user same-daemon_id
+-- mints (MUL-201, ADR 2026-05-03 D9 step 2). Returns distinct non-null
+-- owner_ids for the (workspace_id, daemon_id) pair. Standard SQL `=`
+-- semantics: rows with a NULL daemon_id are excluded automatically (no
+-- IS NOT DISTINCT FROM), which is exactly what we want — a NULL-daemon_id
+-- row carries no ownership claim against a concrete daemon_id.
+--
+-- The unique constraint UNIQUE (workspace_id, daemon_id, provider) creates a
+-- composite B-tree, so this lookup uses the (workspace_id, daemon_id) prefix
+-- — index-supported, not a workspace-wide partition scan.
+SELECT DISTINCT owner_id
+FROM agent_runtime
+WHERE workspace_id = $1
+  AND daemon_id = $2
+  AND owner_id IS NOT NULL;
+
 -- name: CountActiveAgentsByRuntime :one
 SELECT count(*) FROM agent WHERE runtime_id = $1 AND archived_at IS NULL;
 
